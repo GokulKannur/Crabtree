@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Crab Tree</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+</head>
+
+<body>
+    <div id="error-overlay"
+        style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); color:red; z-index:9999; padding:20px; white-space:pre-wrap; font-family:monospace; overflow:auto;">
+    </div>
+    <script>
+        window.addEventListener('error', function (event) {
+            const overlay = document.getElementById('error-overlay');
+            overlay.style.display = 'block';
+            overlay.innerText += `Error: ${event.message}\nAt: ${event.filename}:${event.lineno}:${event.colno}\n\n`;
+        });
+        window.addEventListener('unhandledrejection', function (event) {
+            const overlay = document.getElementById('error-overlay');
+            overlay.style.display = 'block';
+            overlay.innerText += `Unhandled Rejection: ${event.reason}\n\n`;
+        });
+    </script>
+    <!-- Top bar -->
+    <header id="titlebar">
+        <div class="titlebar-left">
+            <span class="app-logo">🦀</span>
+            <span class="app-name">Crab Tree</span>
+            <nav class="menu-bar">
+                <button class="menu-btn" id="btn-new-file" title="New File (Ctrl+N)">➕ New</button>
+                <button class="menu-btn" id="btn-open-file">Open File</button>
+                <button class="menu-btn" id="btn-open-folder">Open Folder</button>
+                <button class="menu-btn" id="btn-save">Save</button>
+                <button class="menu-btn" id="btn-save-as">Save As</button>
+            </nav>
+        </div>
+        <div class="titlebar-right">
+            <button class="icon-btn" id="btn-toggle-sidebar" title="Toggle Sidebar (Ctrl+B)">📁</button>
+            <button class="theme-toggle" id="btn-theme" title="Toggle Theme">
+                <span id="theme-icon">🌙</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main layout -->
+    <div id="main-layout">
+        <!-- Sidebar -->
+        <aside id="sidebar">
+            <div class="sidebar-header">
+                <span class="sidebar-title">EXPLORER</span>
+                <button class="sidebar-toggle-btn" id="btn-collapse-sidebar" title="Collapse">◀</button>
+            </div>
+            <div id="file-tree" class="file-tree">
+                <div class="empty-state">Open a folder to explore files</div>
+            </div>
+        </aside>
+
+        <!-- Editor area -->
+        <div id="editor-area">
+            <!-- Tabs -->
+            <div id="tab-bar">
+                <div id="tabs-container"></div>
+            </div>
+
+            <!-- Query bar -->
+            <div id="query-bar" class="query-bar hidden">
+                <span id="query-prefix" class="query-prefix">Query</span>
+                <input id="query-input" class="query-input" type="text"
+                    placeholder="Filter results..." autocomplete="off" list="query-suggestions" />
+                <span id="query-meta" class="query-meta"></span>
+                <button id="query-save" class="query-action-btn" title="Save current query">Save</button>
+                <select id="query-saved" class="query-saved-select" title="Saved queries">
+                    <option value="">Saved...</option>
+                </select>
+                <button id="query-clear" class="query-clear-btn" title="Clear query">Clear</button>
+            </div>
+            <div id="query-parsebar" class="query-parsebar hidden">
+                <span id="query-parse-summary" class="query-parse-summary"></span>
+                <div id="query-token-list" class="query-token-list"></div>
+            </div>
+            <datalist id="query-suggestions"></datalist>
+
+            <!-- Editor -->
+            <div id="editor-container"></div>
+            
+            <div id="welcome-screen">
+                <div class="welcome-content">
+                    <!-- Left: Branding & shortcuts -->
+                    <div class="welcome-left">
+                        <div class="welcome-logo">🦀</div>
+                        <h1>Crab Tree</h1>
+                        <p class="welcome-subtitle">A modern text editor built with Rust</p>
+                        <div class="welcome-shortcuts">
+                            <div class="shortcut-item">
+                                <kbd>Ctrl+N</kbd>
+                                <span>New File</span>
+                            </div>
+                            <div class="shortcut-item">
+                                <kbd>Ctrl+O</kbd>
+                                <span>Open File</span>
+                            </div>
+                            <div class="shortcut-item">
+                                <kbd>Ctrl+S</kbd>
+                                <span>Save File</span>
+                            </div>
+                            <div class="shortcut-item">
+                                <kbd>Ctrl+F</kbd>
+                                <span>Find</span>
+                            </div>
+                            <div class="shortcut-item">
+                                <kbd>Ctrl+G</kbd>
+                                <span>Go to Line</span>
+                            </div>
+                            <div class="shortcut-item">
+                                <kbd>Ctrl++/-</kbd>
+                                <span>Zoom In/Out</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right: Recent files -->
+                    <div class="welcome-right">
+                        <div class="recent-files">
+                            <h3>Recent Files</h3>
+                            <div id="recent-files-list">
+                                <div class="empty-state">No recent files</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Status bar -->
+    <footer id="status-bar">
+        <div class="status-left">
+            <span id="status-file" class="status-item">No file open</span>
+        </div>
+        <div class="status-right">
+            <span id="status-lang" class="status-item">Plain Text</span>
+            <span class="status-separator">|</span>
+            <span id="status-encoding" class="status-item">UTF-8</span>
+            <span class="status-separator">|</span>
+            <span id="status-eol" class="status-item">CRLF</span>
+            <span class="status-separator">|</span>
+            <span id="status-cursor" class="status-item">Ln 1, Col 1</span>
+            <span class="status-separator">|</span>
+            <span id="status-size" class="status-item">0 B</span>
+            <span class="status-separator">|</span>
+            <span id="status-fontsize" class="status-item clickable" title="Click to reset font size">14px</span>
+            <span class="status-separator">|</span>
+            <span id="status-wrap" class="status-item clickable" title="Toggle word wrap">Wrap: Off</span>
+            <span class="status-separator">|</span>
+            <span id="status-autosave" class="status-item clickable" title="Toggle auto-save">💾 Manual</span>
+        </div>
+    </footer>
+
+    <!-- Go to Line dialog -->
+    <div id="goto-dialog" class="dialog-overlay hidden">
+        <div class="dialog-box">
+            <h3>Go to Line</h3>
+            <input type="number" id="goto-input" placeholder="Enter line number..." min="1" />
+            <div class="dialog-buttons">
+                <button id="goto-cancel" class="dialog-btn secondary">Cancel</button>
+                <button id="goto-go" class="dialog-btn primary">Go</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Unsaved changes dialog -->
+    <div id="close-dialog" class="dialog-overlay hidden">
+        <div class="dialog-box">
+            <h3>⚠️ Unsaved Changes</h3>
+            <p id="close-dialog-msg" class="dialog-message">Do you want to save changes before closing?</p>
+            <p class="dialog-hint">Your changes will be lost if you don't save them.</p>
+            <div class="dialog-buttons three-buttons">
+                <button id="close-dont-save" class="dialog-btn danger">Don't Save</button>
+                <button id="close-cancel" class="dialog-btn secondary">Cancel</button>
+                <button id="close-save" class="dialog-btn primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+</body>
+
+</html>

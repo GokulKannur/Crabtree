@@ -1,0 +1,29 @@
+{
+  "service": "crabtree-api",
+  "environment": "dev",
+  "request_id": "9f1c2d66-8c8e-4f2b-9200-7af2fa0b1986",
+  "timestamp": "2026-02-13T15:40:12Z",
+  "stats": {
+    "requests": 1240,
+    "errors": 7,
+    "p95_ms": 182
+  },
+  "nodes": [
+    {
+      "name": "api-1",
+      "ip": "10.20.1.14",
+      "status": "healthy"
+    },
+    {
+      "name": "api-2",
+      "ip": "10.20.1.15",
+      "status": "degraded",
+      "last_error": "timeout while reading upstream"
+    }
+  ],
+  "features": {
+    "tree_view": true,
+    "data_analyzer": true,
+    "log_highlighting": true
+  }
+}

@@ -1,0 +1,24 @@
+[package]
+name = "crabtree"
+version = "0.1.0"
+description = "Crab Tree - A modern text editor built in Rust"
+authors = ["Gokul"]
+edition = "2021"
+
+[lib]
+name = "crabtree_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+encoding_rs = "0.8"
+chardetng = "0.1"
+walkdir = "2"

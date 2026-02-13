@@ -1,0 +1,9 @@
+{
+    "name": "Crab Tree",
+    "version": "1.0.0",
+    "features": [
+        "word-wrap",
+        "linting"
+    ],
+    "author": "Gokul"
+}

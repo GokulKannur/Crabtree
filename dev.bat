@@ -1,0 +1,3 @@
+@echo off
+echo Starting Crab Tree in Development Mode...
+npm run tauri dev

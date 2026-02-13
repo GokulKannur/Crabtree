@@ -1,0 +1,12 @@
+/node_modules
+/target
+/dist
+/src-tauri/target
+/.DS_Store
+/Thumbs.db
+/npm-debug.log
+/yarn-error.log
+/.idea
+/.vscode
+*.swp
+*.swo
