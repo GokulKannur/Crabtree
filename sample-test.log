@@ -1,5 +1,0 @@
-2026-02-13 15:40:12 INFO [startup] service=crabtree pid=2248 ip=127.0.0.1 message="server started"
-2026-02-13 15:40:17 WARN [cache] service=crabtree pid=2248 ip=127.0.0.1 message="cache miss rate above threshold"
-2026-02-13 15:40:24 ERROR [db] service=crabtree pid=2248 ip=127.0.0.1 message="connection failed"
-2026-02-13 15:40:29 DEBUG [retry] service=crabtree pid=2248 ip=127.0.0.1 message="retrying request"
-2026-02-13 15:40:33 CRITICAL [db] service=crabtree pid=2248 ip=127.0.0.1 message="failover required"

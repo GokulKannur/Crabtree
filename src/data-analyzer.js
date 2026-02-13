@@ -19,6 +19,43 @@ export class DataAnalyzer {
         return stats;
     }
 
+    static detectSecrets(content) {
+        const findings = [];
+        
+        // 🔐 Sensitive key names (high confidence)
+        const sensitiveKeys = /(?:"(?:password|secret|api[_-]?key|private[_-]?key|secret[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|oauth[_-]?token|jwt|bearer|credential|aws[_-]?secret|azure[_-]?key|gcp[_-]?)?key")/gi;
+        if (sensitiveKeys.test(content)) {
+            findings.push('Sensitive key names detected (password, secret, token, etc.)');
+        }
+        
+        // 🔐 AWS-style access key (AKIA + 16 alphanumeric)
+        if (/AKIA[0-9A-Z]{16}/.test(content)) {
+            findings.push('AWS Access Key ID detected');
+        }
+        
+        // 🔐 AWS-style secret (likely 40 chars base64)
+        if (/[A-Za-z0-9\/+=]{40}/.test(content)) {
+            findings.push('High-entropy secret-like value detected');
+        }
+        
+        // 🔐 JWT tokens (header.payload.signature)
+        if (/eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(content)) {
+            findings.push('JWT token detected');
+        }
+        
+        // 🔐 Private key headers
+        if (/-----BEGIN (RSA |DSA |EC |PGP )?PRIVATE KEY-----/.test(content)) {
+            findings.push('Private key detected');
+        }
+        
+        // 🔐 Certificates
+        if (/-----BEGIN CERTIFICATE-----/.test(content)) {
+            findings.push('X.509 certificate detected');
+        }
+        
+        return findings;
+    }
+
     static analyzeJson(content, stats) {
         try {
             const data = JSON.parse(content);
@@ -50,9 +87,10 @@ export class DataAnalyzer {
             };
             stats.insights.push(`Max nesting depth: <strong>${depth(data)}</strong>`);
 
-            // Sensitive data check.
-            if (content.match(/"password"|"secret"|"key"/i)) {
-                stats.insights.push(`Potential secrets detected in keys`);
+            // Enhanced sensitive data detection
+            const secrets = this.detectSecrets(content);
+            if (secrets.length > 0) {
+                stats.insights.push(`⚠️ <strong>Potential secrets:</strong> ${secrets.join(', ')}`);
             }
         } catch (e) {
             stats.insights.push(`Invalid JSON: ${e.message}`);

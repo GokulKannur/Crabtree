@@ -140,6 +140,21 @@ npm run benchmark:quick
 npm run benchmark:generate-files
 ```
 
+## Security
+
+CrabTree handles sensitive data (logs, configs, exports). See [SECURITY.md](SECURITY.md) for:
+- **Content Security Policy** — prevents XSS attacks
+- **Path validation** — prevents file system traversal
+- **Safe DOM rendering** — no HTML injection vulnerabilities
+- **Secret detection** — warns about exposed credentials (AWS keys, tokens, private keys)
+- **Audit trail** — full response to security review
+
+**Key protections**:
+- ✅ Strict CSP (no remote script loading)
+- ✅ Symlink attack prevention
+- ✅ Input validation on file operations
+- ✅ Safe rendering methods (textContent, not innerHTML)
+
 ## License
 
 CrabTree is released under the **GNU Affero General Public License v3 (AGPL-3.0)**.

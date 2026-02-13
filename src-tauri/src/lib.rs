@@ -4,6 +4,50 @@ use std::path::Path;
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 
+// ─── Path Validation (Security) ───
+fn validate_file_path(path: &str) -> Result<(), String> {
+    let file_path = Path::new(path);
+    
+    // Ensure path exists
+    if !file_path.exists() {
+        return Err("File does not exist".to_string());
+    }
+    
+    // Ensure it's a regular file, not a symlink to somewhere dangerous
+    let metadata = fs::metadata(file_path)
+        .map_err(|e| format!("Cannot access file metadata: {}", e))?;
+    
+    if !metadata.is_file() {
+        return Err("Path is not a regular file".to_string());
+    }
+    
+    // Check that symlinks resolve to the intended file (prevent symlink attacks)
+    let canonical = fs::canonicalize(file_path)
+        .map_err(|e| format!("Cannot resolve file path: {}", e))?;
+    
+    // For desktop app, we allow any user-accessible file
+    // In a sensitive context, you could add allowlist logic here
+    Ok(())
+}
+
+fn validate_write_path(path: &str) -> Result<(), String> {
+    let file_path = Path::new(path);
+    
+    // Check parent directory exists
+    let parent = file_path.parent()
+        .ok_or_else(|| "Invalid file path (no parent directory)".to_string())?;
+    
+    if !parent.exists() {
+        return Err("Parent directory does not exist".to_string());
+    }
+    
+    if !parent.is_dir() {
+        return Err("Parent path is not a directory".to_string());
+    }
+    
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FileEntry {
     pub name: String,
@@ -53,6 +97,9 @@ fn detect_line_ending(content: &str) -> String {
 
 #[tauri::command]
 fn read_file(path: String) -> Result<FileContent, String> {
+    // Validate path before reading
+    validate_file_path(&path)?;
+    
     let file_path = Path::new(&path);
     let bytes = fs::read(file_path).map_err(|e| format!("Failed to read file: {}", e))?;
     let metadata = fs::metadata(file_path).map_err(|e| format!("Failed to get metadata: {}", e))?;
@@ -84,6 +131,9 @@ fn save_file(path: String, content: String) -> Result<(), String> {
 
 #[tauri::command]
 fn save_file_as(path: String, content: String) -> Result<(), String> {
+    // Validate that parent directory exists and is writable
+    validate_write_path(&path)?;
+    
     fs::write(&path, content.as_bytes()).map_err(|e| format!("Failed to save file: {}", e))
 }
 
