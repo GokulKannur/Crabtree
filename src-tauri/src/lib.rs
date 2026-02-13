@@ -1,41 +1,85 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
+use once_cell::sync::Lazy;
+
+// ─── Allowlist for approved file/folder access (Security) ───
+/// Tracks paths approved by user through dialogs.
+/// Only these paths (and their contents) are accessible.
+static APPROVED_PATHS: Lazy<Mutex<Vec<PathBuf>>> = Lazy::new(|| {
+    Mutex::new(Vec::new())
+});
+
+/// Add a path to the allowlist (called after user opens file/folder via dialog)
+#[tauri::command]
+fn approve_path(path: String) -> Result<(), String> {
+    let canonical = fs::canonicalize(&path)
+        .map_err(|e| format!("Cannot resolve path: {}", e))?;
+    
+    let mut allowed = APPROVED_PATHS.lock()
+        .map_err(|_| "Allowlist lock poisoned".to_string())?;
+    
+    allowed.push(canonical);
+    Ok(())
+}
+
+/// Check if a path is under an approved parent or is approved itself
+fn is_path_allowed(path: &str) -> Result<PathBuf, String> {
+    let canonical = fs::canonicalize(path)
+        .map_err(|e| format!("Cannot resolve path: {}", e))?;
+    
+    let allowed = APPROVED_PATHS.lock()
+        .map_err(|_| "Allowlist lock poisoned".to_string())?;
+    
+    // Check if path is in the allowlist or under an approved folder
+    for approved in allowed.iter() {
+        if canonical.starts_with(approved) || &canonical == approved {
+            return Ok(canonical);
+        }
+    }
+    
+    Err(format!(
+        "Access denied: {} not in approved paths. User must open file/folder first.",
+        path
+    ))
+}
+
+/// Clear the allowlist (for testing or session reset)
+#[tauri::command]
+fn clear_approved_paths() -> Result<(), String> {
+    let mut allowed = APPROVED_PATHS.lock()
+        .map_err(|_| "Allowlist lock poisoned".to_string())?;
+    allowed.clear();
+    Ok(())
+}
 
 // ─── Path Validation (Security) ───
 fn validate_file_path(path: &str) -> Result<(), String> {
-    let file_path = Path::new(path);
+    // First check allowlist
+    let canonical = is_path_allowed(path)?;
     
-    // Ensure path exists
-    if !file_path.exists() {
-        return Err("File does not exist".to_string());
-    }
-    
-    // Ensure it's a regular file, not a symlink to somewhere dangerous
-    let metadata = fs::metadata(file_path)
+    // Ensure it's a regular file, not a directory
+    let metadata = fs::metadata(&canonical)
         .map_err(|e| format!("Cannot access file metadata: {}", e))?;
     
     if !metadata.is_file() {
         return Err("Path is not a regular file".to_string());
     }
     
-    // Check that symlinks resolve to the intended file (prevent symlink attacks)
-    let canonical = fs::canonicalize(file_path)
-        .map_err(|e| format!("Cannot resolve file path: {}", e))?;
-    
-    // For desktop app, we allow any user-accessible file
-    // In a sensitive context, you could add allowlist logic here
     Ok(())
 }
 
 fn validate_write_path(path: &str) -> Result<(), String> {
     let file_path = Path::new(path);
     
-    // Check parent directory exists
+    // First check allowlist for parent directory
     let parent = file_path.parent()
         .ok_or_else(|| "Invalid file path (no parent directory)".to_string())?;
+    
+    is_path_allowed(parent.to_str().ok_or_else(|| "Invalid path encoding".to_string())?)?;
     
     if !parent.exists() {
         return Err("Parent directory does not exist".to_string());
@@ -43,6 +87,21 @@ fn validate_write_path(path: &str) -> Result<(), String> {
     
     if !parent.is_dir() {
         return Err("Parent path is not a directory".to_string());
+    }
+    
+    Ok(())
+}
+
+fn validate_read_dir(path: &str) -> Result<(), String> {
+    // Check allowlist
+    let canonical = is_path_allowed(path)?;
+    
+    // Ensure it's a directory
+    let metadata = fs::metadata(&canonical)
+        .map_err(|e| format!("Cannot access directory metadata: {}", e))?;
+    
+    if !metadata.is_dir() {
+        return Err("Path is not a directory".to_string());
     }
     
     Ok(())
@@ -188,10 +247,10 @@ fn build_file_tree(dir: &Path, depth: u32, max_depth: u32) -> Vec<FileEntry> {
 
 #[tauri::command]
 fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
+    // Check allowlist first (security)
+    validate_read_dir(&path)?;
+    
     let dir_path = Path::new(&path);
-    if !dir_path.is_dir() {
-        return Err("Not a directory".to_string());
-    }
     Ok(build_file_tree(dir_path, 0, 10))
 }
 
@@ -250,10 +309,11 @@ fn get_file_language(file_name: String) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
+            approve_path,
+            clear_approved_paths,
             read_file,
             save_file,
             save_file_as,

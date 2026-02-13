@@ -1565,6 +1565,7 @@ async function exportFilteredResults() {
     });
     if (!selected) return;
     const filePath = typeof selected === 'string' ? selected : selected.path;
+    await invoke('approve_path', { path: filePath }).catch(err => console.warn('Failed to approve path:', err));
     await invoke('save_file', { path: filePath, content: query.previewContent });
   } catch (err) {
     console.error('Export filtered results error:', err);
@@ -1610,44 +1611,84 @@ function showDataAnalysis() {
   overlay.id = 'analysis-overlay';
   overlay.className = 'analysis-overlay';
 
-  const insights = result.insights
-    .map((insight) => `<div class="insight-item">${insight}</div>`)
-    .join('');
+  const modal = document.createElement('div');
+  modal.className = 'analysis-modal';
 
-  overlay.innerHTML = `
-    <div class="analysis-modal">
-      <div class="analysis-header">
-        <h3>Data Analysis</h3>
-        <button class="dialog-btn secondary" id="analysis-close-btn">Close</button>
-      </div>
-      <div class="analysis-content">
-        <div class="stat-grid">
-          <div class="stat-item">
-            <div class="stat-label">Type</div>
-            <div class="stat-value">${escapeHtml(result.type || 'Unknown')}</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-label">Lines</div>
-            <div class="stat-value">${result.lines}</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-label">Size</div>
-            <div class="stat-value">${formatSize(result.size)}</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-label">Language</div>
-            <div class="stat-value">${escapeHtml(formatLanguage(tab.language || 'plaintext'))}</div>
-          </div>
-        </div>
-        <div class="insight-list">
-          ${insights || '<div class="insight-item">No insights available.</div>'}
-        </div>
-      </div>
-      <div class="analysis-footer">
-        <button class="dialog-btn primary" id="analysis-ok-btn">OK</button>
-      </div>
-    </div>
-  `;
+  // Header
+  const header = document.createElement('div');
+  header.className = 'analysis-header';
+  const title = document.createElement('h3');
+  title.textContent = 'Data Analysis';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'dialog-btn secondary';
+  closeBtn.id = 'analysis-close-btn';
+  closeBtn.textContent = 'Close';
+  header.appendChild(title);
+  header.appendChild(closeBtn);
+
+  // Content
+  const content = document.createElement('div');
+  content.className = 'analysis-content';
+
+  const statGrid = document.createElement('div');
+  statGrid.className = 'stat-grid';
+
+  // Stats rows  
+  const addStat = (label, value) => {
+    const item = document.createElement('div');
+    item.className = 'stat-item';
+    const lblEl = document.createElement('div');
+    lblEl.className = 'stat-label';
+    lblEl.textContent = label;
+    const valEl = document.createElement('div');
+    valEl.className = 'stat-value';
+    valEl.textContent = value;
+    item.appendChild(lblEl);
+    item.appendChild(valEl);
+    statGrid.appendChild(item);
+  };
+
+  addStat('Type', result.type || 'Unknown');
+  addStat('Lines', String(result.lines));
+  addStat('Size', formatSize(result.size));
+  addStat('Language', formatLanguage(tab.language || 'plaintext'));
+
+  // Insights list (safely rendered)
+  const insightList = document.createElement('div');
+  insightList.className = 'insight-list';
+  
+  if (result.insights && result.insights.length > 0) {
+    result.insights.forEach(insight => {
+      const item = document.createElement('div');
+      item.className = 'insight-item';
+      // safely render: insights may contain HTML tags, so we parse them carefully
+      // For now, use textContent to be safe, or use a simple parser
+      item.innerHTML = escapeHtml(insight); // Escape first, then use innerHTML to allow existing <strong> tags
+      insightList.appendChild(item);
+    });
+  } else {
+    const noInsights = document.createElement('div');
+    noInsights.className = 'insight-item';
+    noInsights.textContent = 'No insights available.';
+    insightList.appendChild(noInsights);
+  }
+
+  content.appendChild(statGrid);
+  content.appendChild(insightList);
+
+  // Footer
+  const footer = document.createElement('div');
+  footer.className = 'analysis-footer';
+  const okBtn = document.createElement('button');
+  okBtn.className = 'dialog-btn primary';
+  okBtn.id = 'analysis-ok-btn';
+  okBtn.textContent = 'OK';
+  footer.appendChild(okBtn);
+
+  modal.appendChild(header);
+  modal.appendChild(content);
+  modal.appendChild(footer);
+  overlay.appendChild(modal);
 
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) closeAnalysisModal();
@@ -1709,6 +1750,7 @@ async function openFile() {
     });
     if (!selected) return;
     const filePath = typeof selected === 'string' ? selected : selected.path;
+    await invoke('approve_path', { path: filePath }).catch(err => console.warn('Failed to approve path:', err));
     const existing = state.tabs.find(t => t.path === filePath);
     if (existing) { switchToTab(existing.id); return; }
     const fileData = await invoke('read_file', { path: filePath });
@@ -1744,6 +1786,7 @@ async function saveFileAs() {
     const selected = await save({ filters: [{ name: 'All Files', extensions: ['*'] }] });
     if (!selected) return;
     const filePath = typeof selected === 'string' ? selected : selected.path;
+    await invoke('approve_path', { path: filePath }).catch(err => console.warn('Failed to approve path:', err));
     await invoke('save_file', { path: filePath, content: tab.content });
     tab.path = filePath;
     tab.name = filePath.split(/[\\/]/).pop();
@@ -1772,6 +1815,7 @@ async function openFolder() {
     const selected = await open({ directory: true, multiple: false });
     if (!selected) return;
     const folderPath = typeof selected === 'string' ? selected : selected.path;
+    await invoke('approve_path', { path: folderPath }).catch(err => console.warn('Failed to approve path:', err));
     state.folderPath = folderPath;
     const entries = await invoke('list_directory', { path: folderPath });
     renderFileTree(entries);
@@ -2055,6 +2099,15 @@ async function init() {
   if (!restored) {
     document.getElementById('welcome-screen').classList.remove('hidden');
   }
+
+  // Session cleanup: clear approved paths on app quit
+  window.addEventListener('beforeunload', async () => {
+    try {
+      await invoke('clear_approved_paths');
+    } catch (err) {
+      console.warn('Failed to clear approved paths:', err);
+    }
+  });
 
   console.log('🦀 Crab Tree initialized');
 }

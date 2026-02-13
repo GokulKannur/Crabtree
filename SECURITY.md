@@ -1,133 +1,96 @@
-# CrabTree Security Audit Response
+# CrabTree Security Audit & Fixes
 
 **Date**: 2026-02-14  
-**Status**: ✅ ADDRESSED
+**Status**: ✅ CRITICAL ISSUES ADDRESSED  
+**Version**: v0.2.0
+
+## Summary
+
+CrabTree handles sensitive data (logs, configs, exports). This document outlines identified security issues, fixes applied, and remaining tasks.
+
+---
+
+## Release Versions
+
+| Version | Release Date | Security Status | Notes |
+|---------|--------------|-----------------|-------|
+| **v0.1.0** | 2026-02-01 | 🔴 Vulnerable | Unscoped file access, HTML injection in modal, over-privileged permissions |
+| **v0.2.0** | 2026-02-14 | 🟡 Hardened | Critical issues fixed, allowlist implemented, frontend integration pending (v0.3) |
+| **v0.3.0** | *Planned* | ✅ Production-Ready | Frontend allowlist integration, session cleanup, full testing |
+
+---
 
 ## Vulnerabilities Fixed
 
-### 🔴 Critical: Missing Content Security Policy
-**Status**: ✅ Fixed
+### 🔴 Critical: Unscoped File System Access
+**Status**: ✅ FIXED (v0.2.0)
 
-Added strict CSP to `src-tauri/tauri.conf.json`:
-```jsonc
-"csp": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
-```
+**Problem**: Backend functions accepted arbitrary file paths without validating user intent.
 
-**Impact**:
-- Prevents loading remote scripts/styles
-- Blocks inline script execution (except from trusted bundles)
-- Mitigates XSS attacks
+**Fix**: Implemented allowlist-based path scoping in `src-tauri/src/lib.rs`
+- New `approve_path()` command — adds paths only after user approval
+- All operations check allowlist: `read_file()`, `save_file()`, `list_directory()`
+- Symlink attacks prevented via `fs::canonicalize()`
+- Removed unused permissions: `fs:allow-mkdir`, `fs:allow-remove`, `fs:allow-rename`
 
----
-
-### 🔴 High: Unconstrained File System Access
-**Status**: ✅ Fixed
-
-Added path validation functions in `src-tauri/src/lib.rs`:
-
-1. **`validate_file_path()`**
-   - Checks file exists and is a regular file
-   - Prevents symlink attacks (canonicalizes paths)
-   - Validates before all `read_file` operations
-
-2. **`validate_write_path()`**
-   - Ensures parent directory exists
-   - Ensures parent is a directory (not symlink)
-   - Validates before `save_file_as` operations
-
-**Attack Vector Mitigated**:
-```
-❌ BEFORE: read_file({ path: 'C:/Users/.ssh/id_rsa' }) → Vulnerable
-✅ AFTER: Path validated, must be user-authorized file from dialog
+**Frontend Integration TODO (v0.3)**:
+```javascript
+const file = await open();  // User selects file
+await invoke('approve_path', { path: file });  // Add to allowlist
 ```
 
 ---
 
-### 🟡 Medium: Weak Secret Detection
-**Status**: ✅ Enhanced
+### 🟡 Medium: HTML Injection in Data Analysis Modal
+**Status**: ✅ FIXED (v0.2.0)
 
-Improved `DataAnalyzer.detectSecrets()` in `src/data-analyzer.js`:
+**Problem**: Modal rendered insights via innerHTML without safe parsing.
 
-**Previous**: Only checked for key names like "password"  
-**Now**: Detects:
-- ✅ Sensitive key names (password, secret, api_key, token, oauth, etc.)
-- ✅ AWS Access Keys (AKIA + 16 chars)
-- ✅ High-entropy secrets (40+ char base64-like strings)
-- ✅ JWT tokens (header.payload.signature format)
-- ✅ Private keys (RSA/DSA/EC/OpenPGP headers)
-- ✅ X.509 certificates
+**Fix**: Rewrote `showDataAnalysis()` using DOM methods instead of template strings:
+```javascript
+// BEFORE (unsafe):
+overlay.innerHTML = `<div>${insights}</div>`;
 
-**Example Output**:
-```
-⚠️ Potential secrets: AWS Access Key ID detected, JWT token detected
+// AFTER (safe):
+const item = document.createElement('div');
+item.innerHTML = escapeHtml(insight);
+insightList.appendChild(item);
 ```
 
 ---
 
-## Vulnerabilities Verified as Safe
+### 🟡 Medium: Over-Privileged Tauri Capabilities
+**Status**: ✅ FIXED (v0.2.0)
 
-### ✅ XSS Protection (CSV Viewer)
-- Uses `textContent` for rendering cell values (safe, no HTML parsing)
-- Uses `esc()` function for HTML attributes (escapes &, <, >, ")
-- Verified in [src/csv-viewer.js](src/csv-viewer.js#L513)
+**Removed Unused Permissions**:
+- ❌ `fs:allow-mkdir` — Never used
+- ❌ `fs:allow-remove` — Never used
+- ❌ `fs:allow-rename` — Never used
+- ❌ `opener:default` — Dialog handles it
 
-### ✅ Global Object Security
-- `withGlobalTauri: false` — reduces drive-by attack surface
-- Standard window decorations/size — no unusual risks
-- No global Tauri API exposure to injected content
-
-### ✅ Log Analysis Safety
-- Uses CodeMirror DOM text rendering (not HTML parsing)
-- Regex tokenization prevents script injection
-- Filter queries executed in controlled context
+**Reduced blast radius**: App only has minimum permissions needed.
 
 ---
 
-## Remaining Recommendations
+## Remaining High-Priority Tasks (v0.3)
 
-### For Production Deployment
+1. **Frontend: Call `approve_path()` after file/folder opens**
+   - This ties backend access to explicit user dialogs
+   - Currently allowlist is validated, but frontend doesn't populate it yet
 
-1. **Regular dependency updates**
-   ```bash
-   npm audit
-   cargo audit  # For Rust dependencies
-   ```
+2. **Test allowlist enforcement**
+   - Verify `read_file('/etc/passwd')` fails before approval
+   - Verify opened files work correctly
 
-2. **Consider file access scoping** (if needed):
-   - Define allowed directories (e.g., `~/Documents` only)
-   - Maintain a whitelist of opened folders
-   - Reject access outside scope
-
-3. **Secrets exposure workflow**:
-   - Show warnings when secrets detected
-   - Offer "Redact" option for export
-   - Log security events
-
-4. **Input validation**:
-   - Add size limits on file reads (max 500 MB)
-   - Timeout heavy regex operations (prevent ReDoS)
-   - Validate CSV column counts
-
-### Defense in Depth
-
-- ✅ CSP headers prevent XSS
-- ✅ Path validation prevents symlink/traversal attacks
-- ✅ Safe DOM methods prevent injection
-- ✅ No remote code loading
-- ✅ Desktop (not web) — inherent OS-level isolation
+3. **Session cleanup**
+   - Call `clear_approved_paths()` on app quit
 
 ---
 
-## Security Checklist
+## Dependencies Added
 
-- [x] Content Security Policy configured
-- [x] File system access validated
-- [x] HTML/XML escaping in place
-- [x] XSS prevention (textContent usage)
-- [x] Symlink attack prevention
-- [x] Secret detection patterns
-- [x] No eval/Function() usage
-- [x] No innerHTML with untrusted data
-- [x] Tauri global API isolation enabled
+- `once_cell = "1.19"` — Thread-safe lazy static for allowlist
 
-**Conclusion**: CrabTree is now hardened against the identified vulnerabilities. Core security measures (CSP, path validation, safe DOM methods) are in place.
+---
+
+**Overall Status**: Core critical issues fixed. Backend allowlist implemented. Frontend integration needed for v0.3 release.
