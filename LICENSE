@@ -1,0 +1,122 @@
+GNU AFFERO GENERAL PUBLIC LICENSE
+Version 3, 19 November 2007
+
+Copyright (C) 2026 CrabTree Contributors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+---
+
+TERMS AND CONDITIONS
+
+0. Definitions.
+
+"This License" refers to version 3 of the GNU Affero General Public License.
+
+"The Program" refers to the copyrightable work licensed under this License.
+
+"You" refers to each licensee (an individual or entity exercising rights
+under this License).
+
+"Corresponding Source" for a work in object code form means all the source
+code needed to generate, install, and (for an interactive program) run the
+object code and to modify the work, including scripts to control those
+activities. However, it does not include the work's System Libraries, or
+general-purpose tools or generally available free programs which are used
+unmodified in performing those activities but which are not part of the work.
+
+"Network Server" means a program that provides services (e.g., a web service)
+and allows communication with other programs (e.g., clients).
+
+"Copyleft Section" means the requirement that any software derived from the
+Program must also be released under the same or compatible license.
+
+1. Source Code.
+
+The "source code" for a work means the preferred form of the work for making
+modifications to it. "Object code" means any non-source form of a work.
+
+2. Basic Permissions.
+
+All rights granted under this License are granted for the term of copyright
+on the Program, and are irrevocable provided the stated conditions are met.
+You are granted the royalty-free, worldwide, non-exclusive, no-charge,
+right to exercise all the rights given by this License.
+
+3. Copyleft Requirement.
+
+If you modify the Program, your modified version must also be free software
+under copyleft. Any derivative work must:
+
+(a) Carry prominent notices stating that you modified the files;
+(b) License the entire work under the same license (AGPL-3.0);
+(c) Include a copy of this license with your work;
+(d) If the work is a network service, offer users access to the source code.
+
+4. Network Services.
+
+If you run a modified version of the Program as a network service
+(e.g., hosting it on a server), you must provide a mechanism for users to
+download the complete source code of your modified version, even if they
+do not typically connect to interactive features.
+
+Failure to provide source code to network service users is a material
+breach of this License.
+
+5. Conveying Modified Versions.
+
+You may convey a modified version of the Program under the terms of this
+License provided that you also meet all of these conditions:
+
+(a) The work must carry prominent notices stating the dates of any changes
+    and that it is modified version;
+(b) The work must carry prominent notices stating it is released under
+    this License;
+(c) You must license the entire work under the same terms as this License;
+(d) You must provide recipients with the source code;
+(e) If modified to run on network servers, provide the identical mechanism
+    for network users to download the source code.
+
+6. Patents.
+
+Each contributor grants you a non-exclusive, worldwide, royalty-free patent
+license under claims in their contribution that would be infringed by your
+use of the Program.
+
+7. Additional Terms.
+
+If you combine the Program with other works, you may choose to place the
+combined work under terms of your choice, provided that you also comply
+with this License for each part that is covered by this License.
+
+8. No Warranty.
+
+THE PROGRAM IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+IN NO EVENT SHALL ANY COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE PROGRAM.
+
+9. Limitation of Liability.
+
+IN NO EVENT SHALL ANY CONTRIBUTOR BE LIABLE TO YOU FOR DAMAGES, INCLUDING
+ANY GENERAL, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF
+THE USE OR INABILITY TO USE THE PROGRAM.
+
+---
+
+For a copy of the complete GNU Affero General Public License v3, visit:
+https://www.gnu.org/licenses/agpl-3.0.html

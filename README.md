@@ -1,5 +1,7 @@
 # CrabTree
 
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
 CrabTree is a local-first desktop tool for investigating massive JSON, logs, and CSVs.
 
 Core promise:
@@ -137,4 +139,17 @@ npm run benchmark
 npm run benchmark:quick
 npm run benchmark:generate-files
 ```
+
+## License
+
+CrabTree is released under the **GNU Affero General Public License v3 (AGPL-3.0)**.
+
+This means:
+- ✅ **You can use it freely** — for any purpose, personal or commercial
+- ✅ **You can modify it** — adapt the code to your needs
+- ✅ **You must share improvements** — if you modify and redistribute, your version must be open source
+- ✅ **Network use is covered** — if you run a modified version as a service (e.g., web host), you must provide source code access
+- ✨ **No proprietary forks** — companies cannot make closed-source versions without open-sourcing back
+
+See [LICENSE](LICENSE) for full terms, or visit [gnu.org/licenses/agpl-3.0](https://www.gnu.org/licenses/agpl-3.0)
 "# Crabtree" 
