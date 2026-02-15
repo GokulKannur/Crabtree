@@ -1089,6 +1089,16 @@ function loadNextChunk(tabId) {
   tab.loadedChars = Math.min(tab.loadedChars + state.largeFileChunkChars, tab.fullContent.length);
   tab.content = tab.fullContent.slice(0, tab.loadedChars);
 
+  // If fully loaded, clear progressive state and dismiss banner
+  if (tab.loadedChars >= tab.fullContent.length) {
+    tab.fullContent = null;
+    tab.progressive = false;
+    if (tab.size < state.largeFileStrictThreshold) {
+      tab.readOnly = false;
+      tab.largeFileMode = false;
+    }
+  }
+
   if (state.activeTabId === tab.id) showEditor(tab.id);
 }
 
@@ -1105,6 +1115,7 @@ function loadFullLargeFile(tabId) {
 
   if (tab.size < state.largeFileStrictThreshold) {
     tab.readOnly = false;
+    tab.largeFileMode = false;
   }
 
   if (state.activeTabId === tab.id) showEditor(tab.id);
@@ -2269,10 +2280,50 @@ document.addEventListener('keydown', (e) => {
 
 function toggleSidebar() {
   state.sidebarOpen = !state.sidebarOpen;
-  document.getElementById('sidebar').classList.toggle('collapsed', !state.sidebarOpen);
+  const sidebar = document.getElementById('sidebar');
+  sidebar.classList.toggle('collapsed', !state.sidebarOpen);
+  if (state.sidebarOpen) {
+    sidebar.style.width = (state.sidebarWidth || 240) + 'px';
+  }
   // Status bar sidebar badge
   const badge = document.getElementById('status-sidebar-badge');
   if (badge) badge.classList.toggle('hidden', state.sidebarOpen);
+}
+
+function setupSidebarResize() {
+  const handle = document.getElementById('sidebar-resize-handle');
+  const sidebar = document.getElementById('sidebar');
+  if (!handle || !sidebar) return;
+
+  let startX, startWidth;
+
+  handle.addEventListener('mousedown', (e) => {
+    if (!state.sidebarOpen) return;
+    e.preventDefault();
+    startX = e.clientX;
+    startWidth = sidebar.getBoundingClientRect().width;
+    handle.classList.add('resizing');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const onMouseMove = (e) => {
+      const dx = e.clientX - startX;
+      const newWidth = Math.min(Math.max(startWidth + dx, 140), window.innerWidth * 0.5);
+      sidebar.style.width = newWidth + 'px';
+    };
+
+    const onMouseUp = () => {
+      handle.classList.remove('resizing');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      state.sidebarWidth = sidebar.getBoundingClientRect().width;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
 }
 
 // ─── Command Palette ───
@@ -3183,6 +3234,9 @@ async function init() {
   document.getElementById('btn-theme').addEventListener('click', toggleTheme);
   document.getElementById('btn-collapse-sidebar').addEventListener('click', toggleSidebar);
   document.getElementById('btn-toggle-sidebar').addEventListener('click', toggleSidebar);
+
+  // Sidebar resize handle
+  setupSidebarResize();
 
   // Go to line dialog
   document.getElementById('goto-go').addEventListener('click', goToLine);

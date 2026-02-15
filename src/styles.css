@@ -329,20 +329,50 @@ body.drag-over::after {
 /* ─── Sidebar — Zed style: clean panel, tight items, subtle borders ─── */
 #sidebar {
   width: var(--sidebar-width);
-  min-width: var(--sidebar-width);
+  min-width: 140px;
+  max-width: 50vw;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
-  transition: width 0.2s ease, min-width 0.2s ease, opacity 0.2s ease;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: hidden;
+  flex-shrink: 0;
 }
 
 #sidebar.collapsed {
-  width: 0;
-  min-width: 0;
+  width: 0 !important;
+  min-width: 0 !important;
   border-right: none;
   opacity: 0;
+  transition: width 0.2s ease, min-width 0.2s ease, opacity 0.2s ease;
+}
+
+/* ─── Sidebar Resize Handle ─── */
+.sidebar-resize-handle {
+  width: 6px;
+  min-width: 6px;
+  cursor: col-resize;
+  background: var(--border-subtle);
+  flex-shrink: 0;
+  position: relative;
+  z-index: 10;
+  transition: background 0.15s ease;
+}
+
+.sidebar-resize-handle::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
+  z-index: 11;
+}
+
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle.resizing {
+  background: var(--accent);
 }
 
 .sidebar-header {
@@ -386,7 +416,9 @@ body.drag-over::after {
 .file-tree {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 2px 0;
+  width: 100%;
 }
 
 .empty-state {
@@ -400,15 +432,16 @@ body.drag-over::after {
 .tree-item {
   display: flex;
   align-items: center;
-  padding: 1px 8px 1px 0;
+  padding: 1px 12px 1px 0;
   cursor: pointer;
   font-size: 12px;
   color: var(--text-secondary);
   transition: background 0.08s ease;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  height: 24px;
+  height: 26px;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .tree-item:hover {
@@ -421,10 +454,10 @@ body.drag-over::after {
 }
 
 .tree-icon {
-  width: 16px;
+  width: 20px;
   text-align: center;
   font-size: 11px;
-  margin-right: 3px;
+  margin-right: 5px;
   flex-shrink: 0;
 }
 
@@ -847,6 +880,7 @@ body.drag-over::after {
 
 #editor-container .cm-editor .cm-content {
   caret-color: var(--accent);
+  padding-right: 48px;
 }
 
 #editor-container .cm-editor .cm-cursor {
@@ -2470,6 +2504,8 @@ body.drag-over::after {
   text-overflow: ellipsis;
   font-size: 12.5px;
   transition: color 0.15s ease;
+  min-width: 0;
+  flex: 1;
 }
 
 .tree-name.dir-name {
