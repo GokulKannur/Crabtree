@@ -3,47 +3,84 @@
 // Investigation-grade: stats, sort, filter.
 // ============================================
 
-function parseCsvLine(line, delimiter) {
-  const cells = [];
-  let current = '';
+/**
+ * RFC4180 state-machine CSV parser.
+ * Parses the entire buffer char-by-char. Handles:
+ * - Quoted fields with embedded newlines, delimiters, escaped quotes ("")
+ * - CRLF, LF, and bare CR line endings
+ * Returns array of rows, each row is array of cell strings.
+ */
+function parseCsvStateMachine(raw, delimiter) {
+  const rows = [];
+  let row = [];
+  let field = '';
   let inQuotes = false;
+  const len = raw.length;
 
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') {
-      if (inQuotes && line[i + 1] === '"') {
-        current += '"';
-        i++;
+  for (let i = 0; i < len; i++) {
+    const ch = raw[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        if (i + 1 < len && raw[i + 1] === '"') {
+          // Escaped quote ""
+          field += '"';
+          i++;
+        } else {
+          // End of quoted field
+          inQuotes = false;
+        }
       } else {
-        inQuotes = !inQuotes;
+        field += ch;
       }
-      continue;
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === delimiter) {
+        row.push(field);
+        field = '';
+      } else if (ch === '\r') {
+        row.push(field);
+        field = '';
+        if (row.length > 1 || row[0] !== '') rows.push(row);
+        row = [];
+        if (i + 1 < len && raw[i + 1] === '\n') i++; // skip LF in CRLF
+      } else if (ch === '\n') {
+        row.push(field);
+        field = '';
+        if (row.length > 1 || row[0] !== '') rows.push(row);
+        row = [];
+      } else {
+        field += ch;
+      }
     }
-    if (!inQuotes && ch === delimiter) {
-      cells.push(current);
-      current = '';
-      continue;
-    }
-    current += ch;
   }
-  cells.push(current);
-  return cells;
+
+  // Flush last field/row
+  row.push(field);
+  if (row.length > 1 || row[0] !== '') rows.push(row);
+
+  return rows;
 }
 
-function detectDelimiter(lines) {
+function detectDelimiter(sample) {
   const candidates = [',', ';', '\t', '|'];
   let best = ',';
   let bestScore = -1;
 
-  const probe = lines.slice(0, 20);
+  // Use first ~2KB for detection
+  const probe = sample.substring(0, 2048);
   for (const d of candidates) {
-    let score = 0;
-    for (const line of probe) {
-      const cols = parseCsvLine(line, d).length;
-      score += cols;
+    // Quick heuristic: count occurrences outside quotes
+    let count = 0;
+    let inQ = false;
+    for (let i = 0; i < probe.length; i++) {
+      const ch = probe[i];
+      if (ch === '"') inQ = !inQ;
+      else if (!inQ && ch === d) count++;
     }
-    if (score > bestScore) {
-      bestScore = score;
+    if (count > bestScore) {
+      bestScore = count;
       best = d;
     }
   }
@@ -51,11 +88,8 @@ function detectDelimiter(lines) {
 }
 
 export function parseCsvContent(content, maxRows = 50000) {
-  const allLines = String(content || '')
-    .split(/\r?\n/)
-    .filter((line) => line.length > 0);
-
-  if (allLines.length === 0) {
+  const raw = String(content || '');
+  if (!raw.trim()) {
     return {
       delimiter: ',',
       header: [],
@@ -66,14 +100,24 @@ export function parseCsvContent(content, maxRows = 50000) {
     };
   }
 
-  const delimiter = detectDelimiter(allLines);
-  const header = parseCsvLine(allLines[0], delimiter);
-  const rows = [];
-  const cap = Math.min(maxRows, Math.max(0, allLines.length - 1));
-  for (let i = 1; i <= cap; i++) {
-    const row = parseCsvLine(allLines[i], delimiter);
-    rows.push(row);
+  const delimiter = detectDelimiter(raw);
+  const allRows = parseCsvStateMachine(raw, delimiter);
+
+  if (allRows.length === 0) {
+    return {
+      delimiter,
+      header: [],
+      rows: [],
+      rowCount: 0,
+      colCount: 0,
+      truncated: false,
+    };
   }
+
+  const header = allRows[0];
+  const dataRows = allRows.slice(1);
+  const cap = Math.min(maxRows, dataRows.length);
+  const rows = dataRows.slice(0, cap);
 
   let colCount = header.length;
   for (const row of rows) {
@@ -93,9 +137,9 @@ export function parseCsvContent(content, maxRows = 50000) {
     delimiter,
     header,
     rows,
-    rowCount: allLines.length - 1,
+    rowCount: dataRows.length,
     colCount,
-    truncated: allLines.length - 1 > maxRows,
+    truncated: dataRows.length > maxRows,
   };
 }
 

@@ -50,11 +50,14 @@ A local-first desktop tool for investigating massive JSON, logs, and CSVs. Built
 - **Go To Line** (`Ctrl+G`)
 
 ### 🔒 Security
-- **Secret Detection** — Scans for AWS keys, Stripe tokens, RSA/PGP private keys, GitHub/GitLab tokens, JWTs, passwords. Shows severity-coded warning banner with clickable line numbers.
-- **Path Traversal Protection** — Blocks `../`, URL-encoded traversal, null byte injection
-- **Content Security Policy** — Strict CSP, no remote scripts
-- **Allowlist-based file access** — Backend validates all paths against user-approved allowlist
-- **Safe DOM rendering** — No innerHTML injection vectors
+- **Secret Detection** — Scans for AWS keys, Stripe tokens, RSA/PGP private keys, GitHub/GitLab tokens, JWTs, passwords. Capped at 10K lines, cached with FNV-1a hash, debounced after edits.
+- **Regex Safety Gate** — Validates all user-provided regex patterns for catastrophic backtracking (nested quantifiers). Rejects patterns >256 chars.
+- **Worker-Thread Regex** — Global search and multi-tab regex matching runs off-main-thread with time budgets (5s default). Prevents hangs.
+- **CSV Safety** — RFC4180-compliant parser handles multiline quoted fields; formula injection neutralized (`=`, `+`, `-`, `@` prefixed with `'` on export).
+- **Path Traversal Protection** — Blocks `../`, URL-encoded traversal, null byte injection. Unified `safeSaveToPath()` checks all save paths.
+- **Content Security Policy** — Strict CSP, no remote scripts; Google Fonts allowed via `fonts.googleapis.com`/`fonts.gstatic.com`
+- **Allowlist-based file access** — Backend validates all paths against user-approved allowlist; `validate_write_path()` enforces on save.
+- **Safe DOM rendering** — No innerHTML injection vectors; all user content escaped before regex highlighting
 
 ### 🎨 Design
 - Zed-inspired UI with exact Sand color scale
@@ -70,26 +73,41 @@ A local-first desktop tool for investigating massive JSON, logs, and CSVs. Built
 
 ```bash
 npm install
-cargo tauri dev      # Run as desktop app
-npm run dev          # Run frontend only (browser)
-npm run build        # Production build
-npm test             # Run tests
-npm run benchmark    # Performance benchmarks
+cargo tauri dev           # Run as desktop app
+npm run dev              # Run frontend only (browser)
+npm run build            # Production build
+npm test                 # Run all tests (30 tests, incl. security)
+npm run benchmark        # Full performance benchmarks
+npm run benchmark:quick  # Quick benchmarks (2 sizes)
+npm run benchmark:ci     # CI-gated benchmarks with threshold checks
 ```
 
 ---
 
-## Benchmarks
+## Performance & Testing
+
+### Benchmarks (Feb 2026, Node 20, single-pass)
 
 | Dataset | JSON Parse | JSON Path | JSON Locate | Log Filter | RSS |
 |---------|----------:|----------:|------------:|-----------:|----:|
-| 50 MB   | 991 ms    | 0.15 ms   | 2,809 ms    | 696 ms     | 704 MB |
-| 200 MB  | 18,224 ms | 3.76 ms   | 13,216 ms   | 4,381 ms   | 1,480 MB |
+| 10 MB   | 122 ms    | 0.11 ms   | 464 ms      | 112 ms     | 305 MB |
+| 25 MB   | 325 ms    | 0.02 ms   | 1,016 ms    | 194 ms     | 435 MB |
+
+**Stress scenarios** (CSV parsing 10MB: 354ms, regex validation 10K patterns: 2.2ms, multi-tab search: 103ms)
 
 ```bash
-npm run benchmark           # Full run
-npm run benchmark:quick     # Quick run
+npm run benchmark              # Full 50MB + 200MB
+npm run benchmark:quick        # Quick 10MB + 25MB
+npm run benchmark:ci           # CI mode: quick + threshold checks, exits non-zero on regression
+npm test                       # Unit + integration + security tests (30 tests)
 ```
+
+### Test Suite
+- **30 tests total**: 14 query/CSV functional + 16 new security-hardened tests
+- **Regex ReDoS payloads** rejected: `(a+)+`, `(.*)*`, `(a{2,})+`, all >256 chars
+- **CSV multiline + formula** injection neutralization verified
+- **FNV-1a hash collisions** resistance confirmed
+- **Coverage**: regex validation, worker timeouts, CSV RFC4180, CSV formula, cache correctness
 
 ---
 

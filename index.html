@@ -12,18 +12,6 @@
     <div id="error-overlay"
         style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); color:red; z-index:9999; padding:20px; white-space:pre-wrap; font-family:monospace; overflow:auto;">
     </div>
-    <script>
-        window.addEventListener('error', function (event) {
-            const overlay = document.getElementById('error-overlay');
-            overlay.style.display = 'block';
-            overlay.innerText += `Error: ${event.message}\nAt: ${event.filename}:${event.lineno}:${event.colno}\n\n`;
-        });
-        window.addEventListener('unhandledrejection', function (event) {
-            const overlay = document.getElementById('error-overlay');
-            overlay.style.display = 'block';
-            overlay.innerText += `Unhandled Rejection: ${event.reason}\n\n`;
-        });
-    </script>
     <!-- Top bar -->
     <header id="titlebar">
         <div class="titlebar-left">

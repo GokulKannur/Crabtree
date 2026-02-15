@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-02-13T13:01:20.064Z",
+  "generatedAt": "2026-02-15T14:57:58.026Z",
   "environment": {
     "node": "v24.13.0",
     "platform": "win32",
@@ -7,30 +7,30 @@
   },
   "results": [
     {
-      "dataset": "50MB",
-      "json_size": "50.0 MB",
-      "log_size": "50.0 MB",
-      "json_parse_ms": 990.71,
-      "json_path_ms": 0.15,
-      "json_locate_ms": 2809.09,
-      "log_filter_ms": 695.54,
+      "dataset": "10MB",
+      "json_size": "10.0 MB",
+      "log_size": "10.0 MB",
+      "json_parse_ms": 190.65,
+      "json_path_ms": 0.14,
+      "json_locate_ms": 647.07,
+      "log_filter_ms": 115.25,
       "resolved": true,
       "located": true,
-      "log_matches": 579003,
-      "rss_mb": 704.4
+      "log_matches": 116781,
+      "rss_mb": 305.4
     },
     {
-      "dataset": "200MB",
-      "json_size": "200.0 MB",
-      "log_size": "200.0 MB",
-      "json_parse_ms": 18223.67,
-      "json_path_ms": 3.76,
-      "json_locate_ms": 13216.08,
-      "log_filter_ms": 4380.81,
+      "dataset": "25MB",
+      "json_size": "25.0 MB",
+      "log_size": "25.0 MB",
+      "json_parse_ms": 511.45,
+      "json_path_ms": 0.03,
+      "json_locate_ms": 1704.85,
+      "log_filter_ms": 275.5,
       "resolved": true,
       "located": true,
-      "log_matches": 2298030,
-      "rss_mb": 1479.5
+      "log_matches": 290114,
+      "rss_mb": 434.5
     }
   ]
 }

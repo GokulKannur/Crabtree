@@ -25,6 +25,7 @@ import { search } from '@codemirror/search';
 import { linter, lintGutter } from '@codemirror/lint';
 
 import './styles.css';
+import './error-overlay.js';
 import { CommandPalette } from './command-palette.js';
 import { logLanguage } from './lang-log.js';
 import { JsonViewer } from './json-viewer.js';
@@ -757,7 +758,7 @@ function showEditor(id) {
   updateStatusBar(tab);
   updateQueryBar(tab);
   applyQueryViewEffects(tab);
-  renderSecurityBanner(tab, container);
+  renderSecurityBannerDebounced(tab, container);
 }
 
 function renderJsonTree(tab, container) {
@@ -947,21 +948,61 @@ function hideTabContextMenu() {
   document.getElementById('tab-context-menu')?.remove();
 }
 
-function closeOtherTabs(keepId) {
+async function closeOtherTabs(keepId) {
   const toClose = state.tabs.filter(t => t.id !== keepId && !t.pinned).map(t => t.id);
-  toClose.forEach(id => closeTab(id));
+  for (const id of toClose) {
+    await closeTabAsync(id);
+  }
 }
 
-function closeAllTabs() {
+async function closeAllTabs() {
   const toClose = state.tabs.filter(t => !t.pinned).map(t => t.id);
-  toClose.forEach(id => closeTab(id));
+  for (const id of toClose) {
+    await closeTabAsync(id);
+  }
 }
 
-function closeTabsToRight(fromId) {
+async function closeTabsToRight(fromId) {
   const idx = state.tabs.findIndex(t => t.id === fromId);
   if (idx < 0) return;
   const toClose = state.tabs.slice(idx + 1).filter(t => !t.pinned).map(t => t.id);
-  toClose.forEach(id => closeTab(id));
+  for (const id of toClose) {
+    await closeTabAsync(id);
+  }
+}
+
+// Async version of closeTab that can be awaited for sequential bulk close
+function closeTabAsync(id) {
+  return new Promise((resolve) => {
+    const tab = state.tabs.find(t => t.id === id);
+    if (!tab) { resolve(); return; }
+    if (tab.modified) {
+      showCloseDialog(tab).then(async (result) => {
+        if (result === 'save') {
+          state.activeTabId = tab.id;
+          syncTabContentFromEditor(tab);
+          if (!tab.path) {
+            try {
+              const selected = await save({ filters: [{ name: 'All Files', extensions: ['*'] }] });
+              if (!selected) { resolve(); return; }
+              const filePath = typeof selected === 'string' ? selected : selected.path;
+              await invoke('save_file', { path: filePath, content: tab.content });
+            } catch (err) { console.error('Save error:', err); resolve(); return; }
+          } else {
+            try { await invoke('save_file', { path: tab.path, content: tab.content }); }
+            catch (err) { console.error('Save error:', err); resolve(); return; }
+          }
+          doCloseTab(id);
+        } else if (result === 'dont-save') {
+          doCloseTab(id);
+        }
+        resolve();
+      });
+    } else {
+      doCloseTab(id);
+      resolve();
+    }
+  });
 }
 
 // ─── Pin Tabs ───
@@ -1686,7 +1727,10 @@ async function exportFilteredResults(format = 'text') {
     exportContent = JSON.stringify(lines, null, 2);
     defaultExt = 'json';
   } else if (format === 'csv') {
-    exportContent = 'line_number,content\n' + lines.map((l, i) => `${i + 1},"${l.replace(/"/g, '""')}"`).join('\n');
+    // Neutralize spreadsheet formula injection: prefix cells starting with =, +, -, @ with single quote
+    const neutralizeCsvCell = (v) => /^[=+\-@]/.test(v) ? `'${v}` : v;
+    const safeCsvCell = (cell) => neutralizeCsvCell(cell).replace(/"/g, '""');
+    exportContent = 'line_number,content\n' + lines.map((l, i) => `${i + 1},"${safeCsvCell(l)}"`).join('\n');
     defaultExt = 'csv';
   }
 
@@ -1701,8 +1745,7 @@ async function exportFilteredResults(format = 'text') {
     });
     if (!selected) return;
     const filePath = typeof selected === 'string' ? selected : selected.path;
-    await invoke('approve_path', { path: filePath }).catch(err => console.warn('Failed to approve path:', err));
-    await invoke('save_file', { path: filePath, content: exportContent });
+    await safeSaveToPath(filePath, exportContent);
   } catch (err) {
     console.error('Export filtered results error:', err);
     alert(`Export failed: ${err.message}`);
@@ -1894,6 +1937,19 @@ async function openFile() {
   } catch (err) { console.error('Open file error:', err); }
 }
 
+/**
+ * Unified save helper: path traversal check + approve + write.
+ * Single entry point for all file saves — frontend checks first, backend is final authority.
+ */
+async function safeSaveToPath(filePath, content) {
+  const pathCheck = isPathTraversalSafe(filePath);
+  if (!pathCheck.safe) {
+    throw new Error(`Save blocked: ${pathCheck.reason}`);
+  }
+  await invoke('approve_path', { path: filePath }).catch(err => console.warn('Failed to approve path:', err));
+  await invoke('save_file', { path: filePath, content });
+}
+
 async function saveFile() {
   const tab = state.tabs.find(t => t.id === state.activeTabId);
   if (!tab) return;
@@ -1904,10 +1960,13 @@ async function saveFile() {
   syncTabContentFromEditor(tab);
   if (!tab.path) return saveFileAs();
   try {
-    await invoke('save_file', { path: tab.path, content: tab.content });
+    await safeSaveToPath(tab.path, tab.content);
     tab.modified = false;
     updateTabUI(tab);
-  } catch (err) { console.error('Save error:', err); }
+  } catch (err) {
+    alert(err.message);
+    console.error('Save error:', err);
+  }
 }
 
 async function saveFileAs() {
@@ -1922,8 +1981,7 @@ async function saveFileAs() {
     const selected = await save({ filters: [{ name: 'All Files', extensions: ['*'] }] });
     if (!selected) return;
     const filePath = typeof selected === 'string' ? selected : selected.path;
-    await invoke('approve_path', { path: filePath }).catch(err => console.warn('Failed to approve path:', err));
-    await invoke('save_file', { path: filePath, content: tab.content });
+    await safeSaveToPath(filePath, tab.content);
     tab.path = filePath;
     tab.name = filePath.split(/[\\/]/).pop();
     tab.modified = false;
@@ -2211,6 +2269,30 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// Regex safety: validate user regex input before compiling
+function validateRegexInput(pattern, flags) {
+  if (pattern.length > 256) throw new Error('Regex too long (max 256 chars)');
+  if (flags && !/^[gimsuy]*$/.test(flags)) throw new Error('Invalid regex flags');
+  // Detect potential catastrophic backtracking (nested quantifiers)
+  if (/(^|[^\\])\((?:[^()\\]|\\.)*[+*{]/.test(pattern) && /[+*{][^)]*\)/.test(pattern)) {
+    throw new Error('Potential catastrophic regex (nested quantifiers)');
+  }
+}
+
+// FNV-1a content hash for cache invalidation — full-string, collision-resistant
+function fnv1a(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16);
+}
+
+function hashContent(str) {
+  return `${str.length}:${fnv1a(str)}`;
+}
+
 function formatSize(bytes) {
   if (!bytes) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -2459,59 +2541,75 @@ function runGlobalSearch() {
   if (!query) { resultsDiv.innerHTML = '<div class="empty-state">Type to search across all open tabs</div>'; statusDiv.textContent = ''; return; }
 
   const caseSensitive = document.getElementById('global-search-case')?.checked;
-  let regex;
+  let pattern, flags;
   const regexMatch = query.match(/^\/(.+)\/([gimsuy]*)$/);
   if (regexMatch) {
-    try { regex = new RegExp(regexMatch[1], regexMatch[2] || (caseSensitive ? 'g' : 'gi')); }
-    catch (e) { statusDiv.textContent = 'Invalid regex: ' + e.message; resultsDiv.innerHTML = ''; return; }
+    pattern = regexMatch[1];
+    flags = regexMatch[2] || (caseSensitive ? 'g' : 'gi');
   } else {
-    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    regex = new RegExp(escaped, caseSensitive ? 'g' : 'gi');
+    pattern = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    flags = caseSensitive ? 'g' : 'gi';
   }
 
-  let totalMatches = 0;
-  let html = '';
-  for (const tab of state.tabs) {
-    const content = tab.content || (tab.editorView ? tab.editorView.state.doc.toString() : '');
-    if (!content) continue;
-    const lines = content.split(/\r?\n/);
-    const matches = [];
-    for (let i = 0; i < lines.length; i++) {
-      if (regex.test(lines[i])) {
-        matches.push({ line: i + 1, text: lines[i].substring(0, 200) });
-        if (matches.length >= 50) break;
-      }
-      regex.lastIndex = 0;
-    }
-    if (matches.length === 0) continue;
-    totalMatches += matches.length;
-    html += `<div class="global-search-file"><div class="global-search-file-name">${escapeHtml(tab.name)} <span class="global-search-count">(${matches.length})</span></div>`;
-    for (const m of matches) {
-      const highlighted = m.text.replace(regex, (match) => `<mark>${escapeHtml(match)}</mark>`);
-      regex.lastIndex = 0;
-      html += `<div class="global-search-match" data-tab-id="${tab.id}" data-line="${m.line}"><span class="global-search-line-num">Ln ${m.line}</span> <span class="global-search-line-text">${highlighted}</span></div>`;
-    }
-    html += `</div>`;
+  // Validate before sending to worker
+  try {
+    validateRegexInput(pattern, flags);
+  } catch (e) {
+    statusDiv.textContent = e.message;
+    resultsDiv.innerHTML = '';
+    return;
   }
 
-  if (!html) html = '<div class="empty-state">No matches found</div>';
-  resultsDiv.innerHTML = html;
-  statusDiv.textContent = `${totalMatches} match${totalMatches !== 1 ? 'es' : ''} in ${state.tabs.length} tab${state.tabs.length !== 1 ? 's' : ''}`;
+  // Collect tab data for worker (avoid sending editor views)
+  const tabsForWorker = state.tabs.map(t => ({
+    id: t.id,
+    name: t.name,
+    content: t.content || (t.editorView ? t.editorView.state.doc.toString() : ''),
+  })).filter(t => t.content);
 
-  resultsDiv.querySelectorAll('.global-search-match').forEach(el => {
-    el.addEventListener('click', () => {
-      const tabId = parseInt(el.dataset.tabId);
-      const line = parseInt(el.dataset.line);
-      switchToTab(tabId);
-      const tab = state.tabs.find(t => t.id === tabId);
-      if (tab?.editorView) {
-        const doc = tab.editorView.state.doc;
-        const targetLine = doc.line(Math.min(Math.max(1, line), doc.lines));
-        tab.editorView.dispatch({ selection: { anchor: targetLine.from }, scrollIntoView: true });
-        tab.editorView.focus();
+  statusDiv.textContent = 'Searching…';
+
+  // Run regex search in worker (auto-cancels previous search)
+  workerBridge.regexSearch(tabsForWorker, pattern, flags).then(results => {
+    // Build highlight regex on main thread (safe — already validated)
+    const highlightRe = new RegExp(pattern, flags.includes('g') ? flags : flags + 'g');
+    let totalMatches = 0;
+    let html = '';
+    for (const r of results) {
+      totalMatches += r.matches.length;
+      html += `<div class="global-search-file"><div class="global-search-file-name">${escapeHtml(r.tabName)} <span class="global-search-count">(${r.matches.length})</span></div>`;
+      for (const m of r.matches) {
+        const escaped = escapeHtml(m.text);
+        const highlighted = escaped.replace(highlightRe, (match) => `<mark>${match}</mark>`);
+        highlightRe.lastIndex = 0;
+        html += `<div class="global-search-match" data-tab-id="${r.tabId}" data-line="${m.line}"><span class="global-search-line-num">Ln ${m.line}</span> <span class="global-search-line-text">${highlighted}</span></div>`;
       }
-      closeGlobalSearch();
+      html += `</div>`;
+    }
+
+    if (!html) html = '<div class="empty-state">No matches found</div>';
+    resultsDiv.innerHTML = html;
+    statusDiv.textContent = `${totalMatches} match${totalMatches !== 1 ? 'es' : ''} in ${state.tabs.length} tab${state.tabs.length !== 1 ? 's' : ''}`;
+
+    resultsDiv.querySelectorAll('.global-search-match').forEach(el => {
+      el.addEventListener('click', () => {
+        const tabId = parseInt(el.dataset.tabId);
+        const line = parseInt(el.dataset.line);
+        switchToTab(tabId);
+        const tab = state.tabs.find(t => t.id === tabId);
+        if (tab?.editorView) {
+          const doc = tab.editorView.state.doc;
+          const targetLine = doc.line(Math.min(Math.max(1, line), doc.lines));
+          tab.editorView.dispatch({ selection: { anchor: targetLine.from }, scrollIntoView: true });
+          tab.editorView.focus();
+        }
+        closeGlobalSearch();
+      });
     });
+  }).catch(err => {
+    if (err.message === 'cancelled') return; // superseded by newer search
+    statusDiv.textContent = 'Search error: ' + err.message;
+    resultsDiv.innerHTML = '';
   });
 }
 
@@ -2611,7 +2709,10 @@ function runRegexTest() {
   if (!pattern) { resultsDiv.innerHTML = '<div class="empty-state">Enter a regex pattern</div>'; statusDiv.textContent = ''; return; }
 
   let regex;
-  try { regex = new RegExp(pattern, flags); }
+  try {
+    validateRegexInput(pattern, flags);
+    regex = new RegExp(pattern, flags);
+  }
   catch (e) { resultsDiv.innerHTML = `<div class="regex-error">❌ ${escapeHtml(e.message)}</div>`; statusDiv.textContent = ''; return; }
 
   const lines = testText.split(/\r?\n/);
@@ -2623,7 +2724,8 @@ function runRegexTest() {
     regex.lastIndex = 0;
     if (isMatch) {
       matchCount++;
-      const highlighted = line.replace(regex, (match) => `<mark>${escapeHtml(match)}</mark>`);
+      const escaped = escapeHtml(line);
+      const highlighted = escaped.replace(regex, (match) => `<mark>${match}</mark>`);
       regex.lastIndex = 0;
       html += `<div class="regex-line regex-match"><span class="regex-line-num">${i + 1}</span>${highlighted}</div>`;
     } else {
@@ -3089,7 +3191,7 @@ function openProblemsPanel() {
     panel = document.createElement('div');
     panel.id = 'problems-panel';
     panel.className = 'bottom-panel';
-    document.querySelector('.main-content')?.appendChild(panel);
+    document.getElementById('main-layout')?.appendChild(panel);
   }
   panel.classList.remove('hidden');
   refreshProblemsPanel();
@@ -3128,7 +3230,7 @@ function refreshProblemsPanel() {
         <span style="color:#f7768e">⊘ ${errors.length} Errors</span>
         <span style="color:#e0af68">⚠ ${warnings.length} Warnings</span>
       </span>
-      <button class="problems-close" onclick="closeProblemsPanel()">✕</button>
+      <button class="problems-close" id="problems-close-btn">✕</button>
     </div>
     <div class="problems-list">
       ${problems.slice(0, 200).map(p => `
@@ -3142,6 +3244,9 @@ function refreshProblemsPanel() {
       ${problems.length > 200 ? `<div class="problems-truncated">Showing 200 of ${problems.length} problems</div>` : ''}
     </div>
   `;
+
+  // Close button event listener (not inline onclick, since module scope)
+  panel.querySelector('#problems-close-btn')?.addEventListener('click', closeProblemsPanel);
 
   // Click to jump
   panel.querySelectorAll('.problem-item').forEach(item => {
@@ -3302,11 +3407,12 @@ const SECRET_PATTERNS = [
   { name: 'JWT Token', regex: /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, severity: 'warning' },
 ];
 
-function scanSecrets(content) {
+function scanSecrets(content, maxLines = 10000) {
   const findings = [];
   const lines = content.split('\n');
+  const scanLimit = Math.min(lines.length, maxLines);
   for (const pattern of SECRET_PATTERNS) {
-    for (let i = 0; i < lines.length; i++) {
+    for (let i = 0; i < scanLimit; i++) {
       const matches = lines[i].matchAll(pattern.regex);
       for (const m of matches) {
         findings.push({
@@ -3318,7 +3424,21 @@ function scanSecrets(content) {
       }
     }
   }
+  if (lines.length > maxLines) {
+    findings.push({
+      name: 'Scan Limit',
+      severity: 'warning',
+      line: maxLines,
+      match: `Only first ${maxLines.toLocaleString()} lines scanned`,
+    });
+  }
   return findings;
+}
+
+let _securityBannerTimer = null;
+function renderSecurityBannerDebounced(tab, container) {
+  clearTimeout(_securityBannerTimer);
+  _securityBannerTimer = setTimeout(() => renderSecurityBanner(tab, container), 300);
 }
 
 function renderSecurityBanner(tab, container) {
@@ -3327,8 +3447,17 @@ function renderSecurityBanner(tab, container) {
   if (existing) existing.remove();
 
   const content = getTabDisplayContent(tab) || '';
-  const findings = scanSecrets(content);
-  tab._secretFindings = findings;
+
+  // Cache: skip re-scan if content unchanged (FNV-1a hash for collision resistance)
+  const contentKey = hashContent(content);
+  if (tab._secretCacheKey === contentKey && tab._secretFindings) {
+    // Reuse cached findings
+  } else {
+    tab._secretFindings = scanSecrets(content);
+    tab._secretCacheKey = contentKey;
+  }
+
+  const findings = tab._secretFindings;
 
   if (findings.length === 0) return;
 

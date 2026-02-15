@@ -4,7 +4,7 @@
 // JSON path location to keep the UI responsive.
 // ============================================
 
-import { filterLogContent } from './query-core.js';
+import { filterLogContent, regexSearch } from './query-core.js';
 import { findJsonPathSelection } from './json-path-locator.js';
 
 self.onmessage = function (e) {
@@ -18,6 +18,9 @@ self.onmessage = function (e) {
         break;
       case 'jsonLocate':
         result = findJsonPathSelection(payload.text, payload.pathTokens);
+        break;
+      case 'regexSearch':
+        result = regexSearch(payload.tabs, payload.pattern, payload.flags, payload.maxMatchesPerTab, payload.timeBudgetMs);
         break;
       default:
         throw new Error(`Unknown worker task type: ${type}`);

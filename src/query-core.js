@@ -6,6 +6,16 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Regex safety: validate user regex input before compiling
+export function validateRegexInput(pattern, flags) {
+  if (pattern.length > 256) throw new Error('Regex too long (max 256 chars)');
+  if (flags && !/^[gimsuy]*$/.test(flags)) throw new Error('Invalid regex flags');
+  // Detect potential catastrophic backtracking (nested quantifiers)
+  if (/(^|[^\\])\((?:[^()\\]|\\.)*[+*{]/.test(pattern) && /[+*{][^)]*\)/.test(pattern)) {
+    throw new Error('Potential catastrophic regex (nested quantifiers)');
+  }
+}
+
 function unquote(value) {
   if (!value || value.length < 2) return value;
   const first = value[0];
@@ -32,10 +42,12 @@ function parseRegexValue(input) {
     if (lastSlash > 0) {
       const pattern = raw.slice(1, lastSlash);
       const flags = raw.slice(lastSlash + 1) || 'i';
+      validateRegexInput(pattern, flags);
       return new RegExp(pattern, flags);
     }
   }
 
+  validateRegexInput(raw, 'i');
   return new RegExp(raw, 'i');
 }
 
@@ -325,4 +337,36 @@ export function resolveJsonPathValue(value, tokens) {
     return { found: false, value: undefined };
   }
   return { found: true, value: current };
+}
+
+/**
+ * Run regex search across multiple tab contents (for worker offloading).
+ * Each tab is { id, name, content }. Returns matches per tab.
+ * Enforces a time budget to prevent runaway regex execution.
+ */
+export function regexSearch(tabs, pattern, flags, maxMatchesPerTab = 50, timeBudgetMs = 5000) {
+  validateRegexInput(pattern, flags);
+  const regex = new RegExp(pattern, flags);
+  const deadline = Date.now() + timeBudgetMs;
+  const results = [];
+
+  for (const tab of tabs) {
+    if (Date.now() > deadline) break;
+    const content = tab.content || '';
+    if (!content) continue;
+    const lines = content.split(/\r?\n/);
+    const matches = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (Date.now() > deadline) break;
+      if (regex.test(lines[i])) {
+        matches.push({ line: i + 1, text: lines[i].substring(0, 200) });
+        if (matches.length >= maxMatchesPerTab) break;
+      }
+      regex.lastIndex = 0;
+    }
+    if (matches.length > 0) {
+      results.push({ tabId: tab.id, tabName: tab.name, matches });
+    }
+  }
+  return results;
 }

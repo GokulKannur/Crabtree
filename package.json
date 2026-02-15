@@ -11,6 +11,7 @@
     "test": "node --test",
     "benchmark": "node scripts/benchmark.js",
     "benchmark:quick": "node scripts/benchmark.js --quick",
+    "benchmark:ci": "node scripts/benchmark.js --ci",
     "benchmark:generate-files": "node scripts/generate-comparison-files.js"
   },
   "dependencies": {

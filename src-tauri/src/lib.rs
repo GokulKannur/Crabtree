@@ -185,6 +185,8 @@ fn read_file(path: String) -> Result<FileContent, String> {
 
 #[tauri::command]
 fn save_file(path: String, content: String) -> Result<(), String> {
+    // Validate path against write allowlist (same as save_file_as)
+    validate_write_path(&path)?;
     fs::write(&path, content.as_bytes()).map_err(|e| format!("Failed to save file: {}", e))
 }
 

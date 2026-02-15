@@ -81,4 +81,9 @@ export class WorkerBridge {
   jsonLocate(text, pathTokens) {
     return this._send('jsonLocate', { text, pathTokens });
   }
+
+  /** Run regex search across tabs in the worker — auto-cancels previous request. */
+  regexSearch(tabs, pattern, flags, maxMatchesPerTab = 50, timeBudgetMs = 5000) {
+    return this._send('regexSearch', { tabs, pattern, flags, maxMatchesPerTab, timeBudgetMs });
+  }
 }
