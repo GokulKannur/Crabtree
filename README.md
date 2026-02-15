@@ -1,170 +1,111 @@
-# CrabTree
+# 🦀 CrabTree v3
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-CrabTree is a local-first desktop tool for investigating massive JSON, logs, and CSVs.
+A local-first desktop tool for investigating massive JSON, logs, and CSVs. Built with Tauri + Rust + CodeMirror 6.
 
-Core promise:
-- Viewer-first workflows for structured data.
-- Native desktop performance (Tauri + Rust backend).
-- No cloud dependency for analysis workflows.
+**Core promise**: Open huge data files, filter to root cause, jump to exact values — all without cloud dependency.
 
-## Why it is different
+---
 
-CrabTree is not positioned as a generic IDE clone.
+## Features
 
-It focuses on one painful workflow:
-- Open huge data exports and logs.
-- Filter/find root cause quickly.
-- Jump directly to the exact value in editable source.
+### 📝 Editor
+- Multi-tab code editor (CodeMirror 6)
+- Open/save files and folders with drag-and-drop
+- Session persistence (tabs, state, layout restored on restart)
+- Theme toggle (dark/light), font size, word wrap, line numbers
 
-## Current capabilities
+### 🔍 JSON Investigation
+- Code view + interactive tree view toggle
+- Path query bar (`stats.errors`, `items[120].status`)
+- Exact line/column jump for resolved JSON paths
+- JSON path autocomplete suggestions
 
-### Editor base
-- Multi-tab code editor (CodeMirror 6).
-- Open/save files and folders.
-- Drag-and-drop file open.
-- Recent files and state persistence.
-- Theme, font size, wrap, line numbers.
+### 📋 Log Investigation
+- Structured filter: `AND`, `OR`, `NOT` operators
+- Field filters: `severity:`, `ip:`, `text:`, `message:`
+- Regex: `re:/timeout|latency/i`
+- Tokenized filter visualization chips
+- Save/reuse log filters (persisted)
+- Export filtered results
 
-### JSON investigation
-- Code view + tree view toggle.
-- Path query (`stats.errors`, `items[120].status`).
-- Exact code jump for resolved JSON paths (line/column precise).
-- JSON path autocomplete suggestions in query bar.
+### 📊 CSV Investigation
+- Table view with virtualized rendering
+- Column/row stats, delimiter auto-detection
+- Switch between table and code views
 
-### Log investigation
-- Structured log filter mode with:
-  - `AND`, `OR`, `NOT`
-  - field filters (`severity:`, `ip:`, `text:`, `message:`)
-  - regex filters (`re:/.../i`)
-- Inline parse feedback:
-  - clause/term counts
-  - tokenized filter interpretation chips
-- Save and reuse log filters (persisted in local storage).
-- Export filtered result set to a file.
+### 📂 File Management
+- Sidebar file explorer with folder tree
+- Color-coded file type icons (80+ extensions)
+- Breadcrumb path bar (Zed-inspired)
+- Tab pinning, close-other/close-right actions
+- Large file safety: auto read-only, progressive chunk loading
 
-### CSV investigation
-- CSV/TSV table mode (viewer-first).
-- Virtualized row rendering for large files.
-- Column/row stats and delimiter detection.
-- Fast switch between table and code modes.
+### ⚡ Power Features
+- **Command Palette** (`Ctrl+Shift+P`) — Search all commands
+- **Fuzzy File Finder** (`Ctrl+P`) — Quick-open files from tabs and folder tree
+- **Problems Panel** (`Ctrl+Shift+E`) — Aggregate errors/warnings across tabs
+- **Data Analyzer** — Statistical analysis modal for structured data
+- **Go To Line** (`Ctrl+G`)
 
-### Large file safety
-- Automatic read-only safety mode for large files.
-- Progressive chunk loading.
-- Explicit "Load Full File" controls.
+### 🔒 Security
+- **Secret Detection** — Scans for AWS keys, Stripe tokens, RSA/PGP private keys, GitHub/GitLab tokens, JWTs, passwords. Shows severity-coded warning banner with clickable line numbers.
+- **Path Traversal Protection** — Blocks `../`, URL-encoded traversal, null byte injection
+- **Content Security Policy** — Strict CSP, no remote scripts
+- **Allowlist-based file access** — Backend validates all paths against user-approved allowlist
+- **Safe DOM rendering** — No innerHTML injection vectors
 
-## Query examples
+### 🎨 Design
+- Zed-inspired UI with exact Sand color scale
+- Compact titlebar, seamless tabs, clean sidebar
+- Thin scrollbars, transparent track
+- Both dark and light themes
 
-Log queries:
-- `severity:error AND ip:127.0.0.1`
-- `severity:error AND NOT text:"health check"`
-- `re:/timeout|latency/i OR severity:warn`
+---
 
-JSON path queries:
-- `summary.errors`
-- `items[4].stats.latency_ms`
-- `path:items[42].status`
+## Dev Setup
 
-## Benchmarks
-
-Run:
-
-```bash
-npm run benchmark
-```
-
-Artifacts:
-- `benchmark/latest.json`
-- `benchmark/latest.md`
-
-### CrabTree core benchmark (auto-generated)
-
-Latest run (from `benchmark/latest.md`):
-
-| Dataset | JSON Parse (ms) | JSON Path (ms) | JSON Locate (ms) | Log Filter (ms) | RSS (MB) |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 50MB | 990.71 | 0.15 | 2809.09 | 695.54 | 704.4 |
-| 200MB | 18223.67 | 3.76 | 13216.08 | 4380.81 | 1479.5 |
-
-### VS Code comparison (manual)
-
-Methodology — same machine, same files, cold start (no cache/recent), measured wall-clock:
-
-| # | Dataset | Task | CrabTree (ms) | VS Code (ms) | Notes |
-| --- | --- | --- | ---: | ---: | --- |
-| 1 | 50 MB JSON | Open + parse | 990.71 | _measure_ | CrabTree: instant tree view ready |
-| 2 | 50 MB JSON | Path lookup (`summary.errors`) | 0.15 | _measure_ | VS Code: Ctrl+G or Ctrl+F manual search |
-| 3 | 50 MB JSON | Locate path in source (line+col) | 2,809 | _measure_ | VS Code: no built-in equivalent |
-| 4 | 200 MB JSON | Open + parse | 18,224 | _measure_ | VS Code: may refuse to colorize or tree-view |
-| 5 | 200 MB JSON | Path lookup (`summary.errors`) | 3.76 | _measure_ | VS Code: manual search across 200 MB |
-| 6 | 200 MB log | Filter `severity:error AND NOT text:"health check"` | 4,381 | _measure_ | VS Code: no structured filter; Ctrl+F only |
-
-**How to reproduce the CrabTree column:**
-
-```bash
-npm run benchmark          # full run (50 MB + 200 MB)
-npm run benchmark:quick    # quick run (10 MB + 25 MB)
-```
-
-**How to fill in the VS Code column:**
-
-1. Generate the test files:
-   ```bash
-   node scripts/generate-comparison-files.js
-   ```
-2. Open each file in VS Code (cold start: `code --disable-extensions <file>`).
-3. Measure wall-clock time for:
-   - **Open + parse**: time from `code <file>` until the editor is responsive.
-   - **Path lookup**: use Ctrl+F to search for `"errors":` — time until first result.
-   - **Log filter**: use Ctrl+F to search for `ERROR` — time until match count appears.
-4. Record milliseconds in the table above.
-
-## Dev setup
-
-Prerequisites:
-- Node.js 18+
-- Rust toolchain
-
-Commands:
+**Prerequisites**: Node.js 18+, Rust toolchain
 
 ```bash
 npm install
-npm run dev
-npm run tauri dev
-npm test
-npm run build
-npm run benchmark
-npm run benchmark:quick
-npm run benchmark:generate-files
+cargo tauri dev      # Run as desktop app
+npm run dev          # Run frontend only (browser)
+npm run build        # Production build
+npm test             # Run tests
+npm run benchmark    # Performance benchmarks
 ```
+
+---
+
+## Benchmarks
+
+| Dataset | JSON Parse | JSON Path | JSON Locate | Log Filter | RSS |
+|---------|----------:|----------:|------------:|-----------:|----:|
+| 50 MB   | 991 ms    | 0.15 ms   | 2,809 ms    | 696 ms     | 704 MB |
+| 200 MB  | 18,224 ms | 3.76 ms   | 13,216 ms   | 4,381 ms   | 1,480 MB |
+
+```bash
+npm run benchmark           # Full run
+npm run benchmark:quick     # Quick run
+```
+
+---
 
 ## Security
 
-CrabTree handles sensitive data (logs, configs, exports). See [SECURITY.md](SECURITY.md) for:
-- **Content Security Policy** — prevents XSS attacks
-- **Path validation** — prevents file system traversal
-- **Safe DOM rendering** — no HTML injection vulnerabilities
-- **Secret detection** — warns about exposed credentials (AWS keys, tokens, private keys)
-- **Audit trail** — full response to security review
+See [SECURITY.md](SECURITY.md) for full details on security protections, secret detection patterns, and path validation.
 
-**Key protections**:
-- ✅ Strict CSP (no remote script loading)
-- ✅ Symlink attack prevention
-- ✅ Input validation on file operations
-- ✅ Safe rendering methods (textContent, not innerHTML)
+---
 
 ## License
 
-CrabTree is released under the **GNU Affero General Public License v3 (AGPL-3.0)**.
+**GNU Affero General Public License v3 (AGPL-3.0)**
 
-This means:
-- ✅ **You can use it freely** — for any purpose, personal or commercial
-- ✅ **You can modify it** — adapt the code to your needs
-- ✅ **You must share improvements** — if you modify and redistribute, your version must be open source
-- ✅ **Network use is covered** — if you run a modified version as a service (e.g., web host), you must provide source code access
-- ✨ **No proprietary forks** — companies cannot make closed-source versions without open-sourcing back
+- ✅ Free to use for any purpose
+- ✅ Free to modify and distribute
+- ✅ Modifications must be open-sourced
+- ✅ Network use covered (SaaS must share source)
 
-See [LICENSE](LICENSE) for full terms, or visit [gnu.org/licenses/agpl-3.0](https://www.gnu.org/licenses/agpl-3.0)
-"# Crabtree" 
+See [LICENSE](LICENSE) for full terms.

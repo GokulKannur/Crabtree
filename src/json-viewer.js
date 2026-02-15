@@ -2,6 +2,7 @@
 // CRAB TREE — JSON Tree Viewer
 // ============================================
 
+
 export class JsonViewer {
     constructor(container) {
         this.container = container;
@@ -9,8 +10,57 @@ export class JsonViewer {
 
     render(data) {
         this.container.innerHTML = '';
+
+        // Toolbar: Collapse All / Expand All + Breadcrumb
+        const toolbar = document.createElement('div');
+        toolbar.className = 'json-toolbar';
+
+        const collapseBtn = document.createElement('button');
+        collapseBtn.className = 'json-toolbar-btn';
+        collapseBtn.textContent = '▶ Collapse All';
+        collapseBtn.addEventListener('click', () => this.collapseAll());
+
+        const expandBtn = document.createElement('button');
+        expandBtn.className = 'json-toolbar-btn';
+        expandBtn.textContent = '▼ Expand All';
+        expandBtn.addEventListener('click', () => this.expandAll());
+
+        const breadcrumb = document.createElement('span');
+        breadcrumb.className = 'json-breadcrumb';
+        breadcrumb.id = 'json-breadcrumb';
+        breadcrumb.textContent = '$';
+
+        toolbar.appendChild(collapseBtn);
+        toolbar.appendChild(expandBtn);
+        toolbar.appendChild(breadcrumb);
+        this.container.appendChild(toolbar);
+
         const tree = this.createNode(null, data, true, []); // Root node
         this.container.appendChild(tree);
+    }
+
+    collapseAll() {
+        this.container.querySelectorAll('.json-children').forEach(ch => {
+            ch.classList.add('hidden');
+        });
+        this.container.querySelectorAll('.json-arrow').forEach(a => {
+            a.classList.remove('expanded');
+            a.textContent = '▶';
+        });
+        this.container.querySelectorAll('.json-size').forEach(s => s.classList.add('visible'));
+        this.container.querySelectorAll('.json-close-preview').forEach(c => c.classList.remove('hidden'));
+    }
+
+    expandAll() {
+        this.container.querySelectorAll('.json-children').forEach(ch => {
+            ch.classList.remove('hidden');
+        });
+        this.container.querySelectorAll('.json-arrow').forEach(a => {
+            a.classList.add('expanded');
+            a.textContent = '▼';
+        });
+        this.container.querySelectorAll('.json-size').forEach(s => s.classList.remove('visible'));
+        this.container.querySelectorAll('.json-close-preview').forEach(c => c.classList.add('hidden'));
     }
 
     createNode(key, value, isLast = false, parentPath = []) {
@@ -22,6 +72,17 @@ export class JsonViewer {
         const node = document.createElement('div');
         node.className = 'json-node';
         node.dataset.path = currentPath.map(encodeURIComponent).join('/');
+
+        // Breadcrumb on hover
+        node.addEventListener('mouseenter', () => {
+            const bc = document.getElementById('json-breadcrumb');
+            if (bc) {
+                const pathStr = currentPath.length === 0 ? '$' : '$ > ' + currentPath.map((p, i) => {
+                    return /^\d+$/.test(p) ? `[${p}]` : p;
+                }).join(' > ');
+                bc.textContent = pathStr;
+            }
+        });
 
         // 1. Line content (Key : Value)
         const line = document.createElement('div');

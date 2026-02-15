@@ -68,8 +68,8 @@
             <!-- Query bar -->
             <div id="query-bar" class="query-bar hidden">
                 <span id="query-prefix" class="query-prefix">Query</span>
-                <input id="query-input" class="query-input" type="text"
-                    placeholder="Filter results..." autocomplete="off" list="query-suggestions" />
+                <input id="query-input" class="query-input" type="text" placeholder="Filter results..."
+                    autocomplete="off" list="query-suggestions" />
                 <span id="query-meta" class="query-meta"></span>
                 <button id="query-save" class="query-action-btn" title="Save current query">Save</button>
                 <select id="query-saved" class="query-saved-select" title="Saved queries">
@@ -83,9 +83,12 @@
             </div>
             <datalist id="query-suggestions"></datalist>
 
+            <!-- Breadcrumb path bar (Zed-style) -->
+            <div id="breadcrumb-bar"></div>
+
             <!-- Editor -->
             <div id="editor-container"></div>
-            
+
             <div id="welcome-screen">
                 <div class="welcome-content">
                     <!-- Left: Branding & shortcuts -->
@@ -139,6 +142,8 @@
     <footer id="status-bar">
         <div class="status-left">
             <span id="status-file" class="status-item">No file open</span>
+            <span id="status-sidebar-badge" class="status-item status-badge hidden" title="Sidebar is hidden (Ctrl+B)">◀
+                Sidebar Hidden</span>
         </div>
         <div class="status-right">
             <span id="status-lang" class="status-item">Plain Text</span>

@@ -1,96 +1,105 @@
-# CrabTree Security Audit & Fixes
+# CrabTree Security
 
-**Date**: 2026-02-14  
-**Status**: ✅ CRITICAL ISSUES ADDRESSED  
-**Version**: v0.2.0
-
-## Summary
-
-CrabTree handles sensitive data (logs, configs, exports). This document outlines identified security issues, fixes applied, and remaining tasks.
+**Version**: v3.0.0
+**Last Updated**: 2026-02-15
+**Status**: ✅ Production-Hardened
 
 ---
 
-## Release Versions
+## Overview
 
-| Version | Release Date | Security Status | Notes |
-|---------|--------------|-----------------|-------|
-| **v0.1.0** | 2026-02-01 | 🔴 Vulnerable | Unscoped file access, HTML injection in modal, over-privileged permissions |
-| **v0.2.0** | 2026-02-14 | 🟡 Hardened | Critical issues fixed, allowlist implemented, frontend integration pending (v0.3) |
-| **v0.3.0** | *Planned* | ✅ Production-Ready | Frontend allowlist integration, session cleanup, full testing |
+CrabTree handles sensitive data — logs, configs, exports, and files that may contain credentials. All security layers are active and enforced.
 
 ---
 
-## Vulnerabilities Fixed
+## Protections
 
-### 🔴 Critical: Unscoped File System Access
-**Status**: ✅ FIXED (v0.2.0)
+### 🔒 Secret Detection (v3.0)
 
-**Problem**: Backend functions accepted arbitrary file paths without validating user intent.
+CrabTree automatically scans file content for exposed credentials and shows a severity-coded warning banner above the editor.
 
-**Fix**: Implemented allowlist-based path scoping in `src-tauri/src/lib.rs`
-- New `approve_path()` command — adds paths only after user approval
-- All operations check allowlist: `read_file()`, `save_file()`, `list_directory()`
-- Symlink attacks prevented via `fs::canonicalize()`
-- Removed unused permissions: `fs:allow-mkdir`, `fs:allow-remove`, `fs:allow-rename`
+**Detected patterns**:
 
-**Frontend Integration TODO (v0.3)**:
-```javascript
-const file = await open();  // User selects file
-await invoke('approve_path', { path: file });  // Add to allowlist
+| Severity | Pattern | Example |
+|----------|---------|---------|
+| 🚨 Critical | AWS Access Key | `AKIA...` (20 chars) |
+| 🚨 Critical | AWS Secret Key | `aws_secret_access_key=...` |
+| 🚨 Critical | RSA/EC/DSA/OPENSSH Private Key | `-----BEGIN RSA PRIVATE KEY-----` |
+| 🚨 Critical | PGP Private Key | `-----BEGIN PGP PRIVATE KEY BLOCK-----` |
+| ⚠️ High | Stripe API Key | `sk_live_...` / `pk_live_...` |
+| ⚠️ High | GitHub Token | `ghp_...` / `gho_...` / `ghu_...` |
+| ⚠️ High | GitLab Token | `glpat-...` |
+| 🔍 Warning | Generic password/secret | `password = "..."`, `api_key = "..."` |
+| 🔍 Warning | JWT Token | `eyJ...eyJ...` (3-part base64) |
+
+**Behavior**: Findings are grouped by type with clickable line numbers that jump directly to the offending line in the editor.
+
+---
+
+### 🛡️ Path Traversal Protection (v3.0)
+
+File paths are validated against directory traversal attacks:
+
+| Attack Vector | Blocked |
+|---------------|---------|
+| `../../../etc/passwd` | ✅ |
+| `..\..\Windows\System32\config\SAM` | ✅ |
+| `%2e%2e%2f%2e%2e%2fetc%2fpasswd` | ✅ (URL-encoded) |
+| Null byte injection (`\0`) | ✅ |
+
+---
+
+### 🔐 Backend Allowlist (v2.0+)
+
+All file system operations are gated by an allowlist in `src-tauri/src/lib.rs`:
+
+- `approve_path()` — Adds paths only after user dialog selection
+- `read_file()`, `save_file()`, `list_directory()` — All check allowlist before proceeding
+- `fs::canonicalize()` — Resolves symlinks to prevent symlink attacks
+- `clear_approved_paths()` — Called on app quit to wipe session state
+
+---
+
+### 🌐 Content Security Policy
+
+Strict CSP configured in `tauri.conf.json`:
+
+```
+default-src 'none';
+script-src 'self';
+style-src 'self' 'unsafe-inline';
+img-src 'self' data:;
+font-src 'self';
+connect-src 'self';
+frame-ancestors 'none';
+base-uri 'self';
+form-action 'self';
 ```
 
----
-
-### 🟡 Medium: HTML Injection in Data Analysis Modal
-**Status**: ✅ FIXED (v0.2.0)
-
-**Problem**: Modal rendered insights via innerHTML without safe parsing.
-
-**Fix**: Rewrote `showDataAnalysis()` using DOM methods instead of template strings:
-```javascript
-// BEFORE (unsafe):
-overlay.innerHTML = `<div>${insights}</div>`;
-
-// AFTER (safe):
-const item = document.createElement('div');
-item.innerHTML = escapeHtml(insight);
-insightList.appendChild(item);
-```
+- ❌ No remote script loading
+- ❌ No iframe embedding
+- ❌ No external connections
 
 ---
 
-### 🟡 Medium: Over-Privileged Tauri Capabilities
-**Status**: ✅ FIXED (v0.2.0)
+### 🧱 Safe DOM Rendering
 
-**Removed Unused Permissions**:
-- ❌ `fs:allow-mkdir` — Never used
-- ❌ `fs:allow-remove` — Never used
-- ❌ `fs:allow-rename` — Never used
-- ❌ `opener:default` — Dialog handles it
-
-**Reduced blast radius**: App only has minimum permissions needed.
+- All user content rendered via `textContent` or `escapeHtml()`
+- No raw `innerHTML` with user data
+- XSS payloads like `<script>`, `<img onerror>`, `<svg onload>` render as visible text
 
 ---
 
-## Remaining High-Priority Tasks (v0.3)
+## Version History
 
-1. **Frontend: Call `approve_path()` after file/folder opens**
-   - This ties backend access to explicit user dialogs
-   - Currently allowlist is validated, but frontend doesn't populate it yet
-
-2. **Test allowlist enforcement**
-   - Verify `read_file('/etc/passwd')` fails before approval
-   - Verify opened files work correctly
-
-3. **Session cleanup**
-   - Call `clear_approved_paths()` on app quit
+| Version | Date | Security Changes |
+|---------|------|-----------------|
+| **v3.0.0** | 2026-02-15 | Secret detection scanner, path traversal protection, Zed UI overhaul |
+| **v2.0.0** | 2026-02-14 | Allowlist-based file access, CSP hardening, HTML injection fix, permission reduction |
+| **v1.0.0** | 2026-02-01 | Initial release |
 
 ---
 
-## Dependencies Added
+## Reporting Vulnerabilities
 
-- `once_cell = "1.19"` — Thread-safe lazy static for allowlist
-
----
-
-**Overall Status**: Core critical issues fixed. Backend allowlist implemented. Frontend integration needed for v0.3 release.
+If you discover a security issue, please open an issue on the GitHub repository or contact the maintainer directly.

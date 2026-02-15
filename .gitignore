@@ -1,12 +1,24 @@
+# Dependencies
 /node_modules
-/target
+
+# Build output
 /dist
+/target
 /src-tauri/target
-/.DS_Store
-/Thumbs.db
-/npm-debug.log
-/yarn-error.log
-/.idea
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
 /.vscode
+/.idea
 *.swp
 *.swo
+
+# Debug logs
+npm-debug.log
+yarn-error.log
+
+# Test artifacts
+/crabtree_test_area
