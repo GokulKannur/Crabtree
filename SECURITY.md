@@ -128,7 +128,7 @@ All 30 tests passing (npm test).
 
 ## Protections
 
-### 🔒 Secret Detection (v3.0)
+### 🔒 Secret Detection (v3.1)
 
 CrabTree automatically scans file content for exposed credentials and shows a severity-coded warning banner above the editor.
 
@@ -150,7 +150,7 @@ CrabTree automatically scans file content for exposed credentials and shows a se
 
 ---
 
-### 🛡️ Path Traversal Protection (v3.0)
+### 🛡️ Path Traversal Protection (v3.1)
 
 File paths are validated against directory traversal attacks:
 
