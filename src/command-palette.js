@@ -2,12 +2,17 @@
 // CRAB TREE — Command Palette & Registry
 // ============================================
 
+import { buildFuzzyIndex, loadRecencyMap, queryFuzzyIndex, recordFuzzyUsage } from './fuzzy-index.js';
+
+const COMMAND_RECENCY_KEY = 'crabtree-command-recency';
+
 export class CommandPalette {
     constructor() {
         this.commands = [];
         this.isOpen = false;
         this.selectedIndex = 0;
         this.filteredCommands = [];
+        this.recencyMap = loadRecencyMap(COMMAND_RECENCY_KEY);
 
         // Create UI on init
         this.createUI();
@@ -15,7 +20,17 @@ export class CommandPalette {
     }
 
     register(id, label, action, shortcut = null) {
-        this.commands.push({ id, label, action, shortcut });
+        if (typeof action !== 'function') {
+            throw new Error(`CommandPalette.register: action for "${id}" must be a function, got ${typeof action}`);
+        }
+        const next = { id, label, action, shortcut };
+        const idx = this.commands.findIndex(c => c.id === id);
+        if (idx >= 0) this.commands[idx] = next;
+        else this.commands.push(next);
+    }
+
+    unregister(id) {
+        this.commands = this.commands.filter(c => c.id !== id);
     }
 
     createUI() {
@@ -96,9 +111,12 @@ export class CommandPalette {
 
     filterCommands() {
         const query = this.inputEntry.value.toLowerCase();
-        this.filteredCommands = this.commands.filter(cmd =>
-            cmd.label.toLowerCase().includes(query)
-        );
+        const index = buildFuzzyIndex(this.commands, {
+            textFields: ['label', 'id', 'shortcut'],
+            recencyMap: this.recencyMap,
+        });
+        const ranked = queryFuzzyIndex(index, query, { limit: 120, pathField: 'label', recencyWeight: 0.000001 });
+        this.filteredCommands = ranked.map(r => r.item);
         this.selectedIndex = 0;
         this.renderList();
     }
@@ -149,6 +167,8 @@ export class CommandPalette {
         if (this.filteredCommands[this.selectedIndex]) {
             const cmd = this.filteredCommands[this.selectedIndex];
             this.close();
+            recordFuzzyUsage(COMMAND_RECENCY_KEY, cmd.id);
+            this.recencyMap.set(cmd.id, Date.now());
             try {
                 cmd.action();
             } catch (err) {

@@ -1,6 +1,6 @@
 [package]
 name = "crabtree"
-version = "3.1.0"
+version = "3.2.0"
 description = "Crab Tree - A modern text editor built in Rust"
 authors = ["Gokul"]
 edition = "2021"

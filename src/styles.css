@@ -2476,19 +2476,27 @@ body.drag-over::after {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
+  min-width: 20px;
   height: 16px;
+  padding: 0 3px;
   border-radius: 3px;
-  font-size: 8px;
-  font-weight: 700;
+  font-size: 9px;
+  font-weight: 600;
   font-family: var(--font-mono);
-  letter-spacing: -0.5px;
-  color: #1a1b26;
+  letter-spacing: 0.2px;
+  color: var(--bg-primary);
   background: var(--fi-color);
   margin-right: 6px;
   flex-shrink: 0;
   line-height: 1;
   text-transform: uppercase;
+  opacity: 0.85;
+  transition: opacity 0.15s ease;
+}
+
+.tree-item:hover .file-icon-badge,
+.tab:hover .file-icon-badge {
+  opacity: 1;
 }
 
 .tab-icon {
@@ -2944,4 +2952,196 @@ body.drag-over::after {
 
 .secret-line:hover {
   color: var(--accent-hover);
+}
+
+/* --- Worktree Trust --- */
+.trust-status-badge {
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.trust-status-badge.restricted {
+  color: var(--warning);
+  border-color: rgba(224, 175, 104, 0.5);
+}
+
+.trust-status-badge.trusted {
+  color: var(--success);
+  border-color: rgba(158, 206, 106, 0.5);
+}
+
+/* --- Outline Panel --- */
+.outline-panel {
+  width: 300px;
+  border-left: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  max-width: 40vw;
+}
+
+.outline-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.outline-title {
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.outline-close {
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.outline-subtitle {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.outline-items {
+  overflow: auto;
+  flex: 1;
+  padding: 6px 0;
+}
+
+.outline-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.outline-item:hover {
+  background: var(--bg-hover);
+}
+
+.outline-line {
+  color: var(--text-muted);
+  font-size: 10px;
+  min-width: 36px;
+  text-align: right;
+}
+
+.outline-empty {
+  padding: 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* --- Tasks Panel --- */
+.task-panel {
+  min-height: 220px;
+  max-height: 45vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.task-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.task-title {
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.task-status {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.task-controls {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.task-controls select {
+  flex: 1;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 0 8px;
+  min-height: 30px;
+}
+
+.task-history {
+  overflow: auto;
+  padding: 8px 10px;
+  flex: 1;
+}
+
+.task-history-row {
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  padding: 6px;
+  background: var(--bg-primary);
+}
+
+.task-history-row.ok {
+  border-color: rgba(158, 206, 106, 0.35);
+}
+
+.task-history-row.fail {
+  border-color: rgba(247, 118, 142, 0.45);
+}
+
+.task-history-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.task-history-output {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  color: var(--text-primary);
+}
+
+/* --- Diagnostics Filter --- */
+.diag-filter {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 11px;
+}
+
+@media (max-width: 900px) {
+  .outline-panel {
+    display: none;
+  }
 }

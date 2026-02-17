@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
+use std::time::Instant;
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 use once_cell::sync::Lazy;
@@ -13,7 +16,8 @@ static APPROVED_PATHS: Lazy<Mutex<Vec<PathBuf>>> = Lazy::new(|| {
     Mutex::new(Vec::new())
 });
 
-/// Add a path to the allowlist (called after user opens file/folder via dialog)
+/// Add a path to the allowlist (called after user opens file/folder via dialog).
+/// Deduplicates to prevent unbounded growth from repeated saves.
 #[tauri::command]
 fn approve_path(path: String) -> Result<(), String> {
     let canonical = fs::canonicalize(&path)
@@ -22,7 +26,9 @@ fn approve_path(path: String) -> Result<(), String> {
     let mut allowed = APPROVED_PATHS.lock()
         .map_err(|_| "Allowlist lock poisoned".to_string())?;
     
-    allowed.push(canonical);
+    if !allowed.contains(&canonical) {
+        allowed.push(canonical);
+    }
     Ok(())
 }
 
@@ -308,6 +314,78 @@ fn get_file_language(file_name: String) -> String {
     .to_string()
 }
 
+#[derive(Serialize, Deserialize)]
+struct TaskRunResult {
+    ok: bool,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    duration_ms: u128,
+}
+
+fn validate_task_command(command: &str) -> Result<(), String> {
+    if command.trim().is_empty() {
+        return Err("Task command cannot be empty".to_string());
+    }
+    if command.contains('\0') {
+        return Err("Invalid task command".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn run_task(
+    command: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    env: Option<HashMap<String, String>>,
+) -> Result<TaskRunResult, String> {
+    validate_task_command(&command)?;
+
+    let mut cmd = Command::new(command.trim());
+    cmd.args(args);
+
+    if let Some(raw_cwd) = cwd {
+        if !raw_cwd.trim().is_empty() {
+            validate_read_dir(&raw_cwd)?;
+            let canonical = fs::canonicalize(&raw_cwd)
+                .map_err(|e| format!("Cannot resolve task cwd: {}", e))?;
+            cmd.current_dir(canonical);
+        }
+    }
+
+    if let Some(env_map) = env {
+        for (k, v) in env_map {
+            if k.len() > 64 {
+                eprintln!("Warning: env var name '{}' exceeds 64 chars, skipping", &k[..k.len().min(32)]);
+                continue;
+            }
+            if v.len() > 8192 {
+                eprintln!("Warning: env var '{}' value exceeds 8192 chars, skipping", k);
+                continue;
+            }
+            cmd.env(k, v);
+        }
+    }
+
+    let started = Instant::now();
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to run task: {}", e))?;
+    let elapsed = started.elapsed().as_millis();
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    Ok(TaskRunResult {
+        ok: output.status.success(),
+        exit_code,
+        stdout,
+        stderr,
+        duration_ms: elapsed,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -320,7 +398,8 @@ pub fn run() {
             save_file,
             save_file_as,
             list_directory,
-            get_file_language
+            get_file_language,
+            run_task
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

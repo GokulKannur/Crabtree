@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-02-15T14:57:58.026Z",
+  "generatedAt": "2026-02-17T09:32:39.415Z",
   "environment": {
     "node": "v24.13.0",
     "platform": "win32",
@@ -10,27 +10,27 @@
       "dataset": "10MB",
       "json_size": "10.0 MB",
       "log_size": "10.0 MB",
-      "json_parse_ms": 190.65,
-      "json_path_ms": 0.14,
-      "json_locate_ms": 647.07,
-      "log_filter_ms": 115.25,
+      "json_parse_ms": 61.9,
+      "json_path_ms": 0.08,
+      "json_locate_ms": 239.29,
+      "log_filter_ms": 47.64,
       "resolved": true,
       "located": true,
       "log_matches": 116781,
-      "rss_mb": 305.4
+      "rss_mb": 304.9
     },
     {
       "dataset": "25MB",
       "json_size": "25.0 MB",
       "log_size": "25.0 MB",
-      "json_parse_ms": 511.45,
-      "json_path_ms": 0.03,
-      "json_locate_ms": 1704.85,
-      "log_filter_ms": 275.5,
+      "json_parse_ms": 219.28,
+      "json_path_ms": 0.04,
+      "json_locate_ms": 461.52,
+      "log_filter_ms": 93.25,
       "resolved": true,
       "located": true,
       "log_matches": 290114,
-      "rss_mb": 434.5
+      "rss_mb": 482.6
     }
   ]
 }

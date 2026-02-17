@@ -1,4 +1,4 @@
-// ============================================
+﻿// ============================================
 // CRAB TREE — Main Application Module
 // ============================================
 
@@ -28,11 +28,15 @@ import './styles.css';
 import './error-overlay.js';
 import { CommandPalette } from './command-palette.js';
 import { logLanguage } from './lang-log.js';
-import { JsonViewer } from './json-viewer.js';
-import { CsvViewer } from './csv-viewer.js';
-import { DataAnalyzer } from './data-analyzer.js';
 import { parseJsonPathTokens, resolveJsonPathValue } from './query-core.js';
 import { WorkerBridge } from './worker-bridge.js';
+import { buildFuzzyIndex, loadRecencyMap, queryFuzzyIndex, recordFuzzyUsage } from './fuzzy-index.js';
+import { collectDiagnostics, toCodeMirrorDiagnostics } from './diagnostics-core.js';
+import { buildOutline } from './outline-core.js';
+import { WorktreeTrustManager, createTrustSnapshot } from './worktree-trust.js';
+import { buildWorkspaceDocument, buildGlobalSearchSection, buildProblemsSection } from './investigation-workspace.js';
+import { TaskRunner } from './task-runner.js';
+import { ExtensionHost } from './extension-host.js';
 
 function loadSavedLogFilters() {
   try {
@@ -66,10 +70,49 @@ const state = {
   largeFileWarnThreshold: 25 * 1024 * 1024,
   largeFileStrictThreshold: 100 * 1024 * 1024,
   largeFileChunkChars: 1_000_000,
+  diagnosticsSeverityFilter: localStorage.getItem('crabtree-diagnostics-severity') || 'all',
 };
 
 // Worker bridge — heavy queries run off the main thread
 const workerBridge = new WorkerBridge();
+const trustManager = new WorktreeTrustManager();
+const taskRunner = new TaskRunner();
+const finderRecencyMap = loadRecencyMap('crabtree-finder-recency');
+let latestGlobalSearchResults = [];
+let latestProblemsSnapshot = [];
+let outlinePanelOpen = false;
+let taskPanelOpen = false;
+
+const extensionHost = new ExtensionHost(async (filePath) => {
+  const file = await invoke('read_file', { path: filePath });
+  return file.content;
+});
+
+// Lazy-loaded heavy modules for faster initial startup
+let jsonViewerModulePromise = null;
+let csvViewerModulePromise = null;
+let dataAnalyzerModulePromise = null;
+
+function loadJsonViewerModule() {
+  if (!jsonViewerModulePromise) {
+    jsonViewerModulePromise = import('./json-viewer.js');
+  }
+  return jsonViewerModulePromise;
+}
+
+function loadCsvViewerModule() {
+  if (!csvViewerModulePromise) {
+    csvViewerModulePromise = import('./csv-viewer.js');
+  }
+  return csvViewerModulePromise;
+}
+
+function loadDataAnalyzerModule() {
+  if (!dataAnalyzerModulePromise) {
+    dataAnalyzerModulePromise = import('./data-analyzer.js');
+  }
+  return dataAnalyzerModulePromise;
+}
 
 // ─── Session Persistence ───
 const SESSION_KEY = 'crabtree-session';
@@ -132,6 +175,7 @@ async function restoreSession() {
       try {
         state.folderPath = session.folderPath;
         const entries = await invoke('list_directory', { path: session.folderPath });
+        state.folderEntries = entries;
         renderFileTree(entries);
       } catch { /* folder may no longer exist */ }
     }
@@ -214,38 +258,37 @@ function getLanguageExtension(lang) {
 }
 
 // ─── JSON Linter ───
-function jsonLinter() {
+const DIAG_SEVERITY_ORDER = {
+  error: 3,
+  warning: 2,
+  info: 1,
+};
+
+function passesDiagnosticsFilter(severity) {
+  const wanted = state.diagnosticsSeverityFilter || 'all';
+  if (wanted === 'all') return true;
+  if (wanted === 'error') return severity === 'error';
+  if (wanted === 'warning') return severity === 'error' || severity === 'warning';
+  return DIAG_SEVERITY_ORDER[severity] >= 1;
+}
+
+function contentLinter(language) {
   return linter((view) => {
-    const diagnostics = [];
     const doc = view.state.doc.toString();
-    if (!doc.trim()) return diagnostics;
-    try {
-      JSON.parse(doc);
-    } catch (e) {
-      const match = e.message.match(/position (\d+)/);
-      const pos = match ? parseInt(match[1]) : 0;
-      const safePos = Math.min(pos, doc.length);
-      diagnostics.push({
-        from: safePos,
-        to: Math.min(safePos + 1, doc.length),
-        severity: 'error',
-        message: e.message,
-      });
-    }
-    return diagnostics;
+    const diagnostics = toCodeMirrorDiagnostics(doc, language);
+    return diagnostics.filter((d) => passesDiagnosticsFilter(d.severity));
   });
 }
 
 function getLinter(lang) {
-  if (lang === 'json') return [jsonLinter(), lintGutter()];
-  return [];
+  return [contentLinter(lang), lintGutter()];
 }
 
 // ─── Theme ───
 function applyTheme(theme) {
   state.theme = theme;
   document.documentElement.setAttribute('data-theme', theme);
-  document.getElementById('theme-icon').textContent = theme === 'dark' ? '🌙' : '☀️';
+  document.getElementById('theme-icon').textContent = theme === 'dark' ? '☾' : '☀';
   localStorage.setItem('crabtree-theme', theme);
 }
 
@@ -307,7 +350,7 @@ function toggleAutoSave() {
   state.autoSave = !state.autoSave;
   localStorage.setItem('crabtree-autosave', state.autoSave);
   const el = document.getElementById('status-autosave');
-  if (el) el.textContent = state.autoSave ? '💾 Auto' : '💾 Manual';
+  if (el) el.textContent = state.autoSave ? '◉ Auto' : '○ Manual';
 }
 
 function scheduleAutoSave(tabId) {
@@ -315,14 +358,14 @@ function scheduleAutoSave(tabId) {
   if (autoSaveTimers[tabId]) clearTimeout(autoSaveTimers[tabId]);
   autoSaveTimers[tabId] = setTimeout(async () => {
     const tab = state.tabs.find(t => t.id === tabId);
-    if (tab && tab.modified && tab.path) {
-      syncTabContentFromEditor(tab);
-      try {
-        await invoke('save_file', { path: tab.path, content: tab.content });
-        tab.modified = false;
-        updateTabUI(tab);
-        flashAutoSaveIndicator();
-      } catch (err) {
+      if (tab && tab.modified && tab.path) {
+        syncTabContentFromEditor(tab);
+        try {
+          await safeSaveToPath(tab.path, tab.content);
+          tab.modified = false;
+          updateTabUI(tab);
+          flashAutoSaveIndicator();
+        } catch (err) {
         console.error('Auto-save error:', err);
       }
     }
@@ -349,8 +392,10 @@ function renderRecentFiles() {
   state.recentFiles.forEach(item => {
     const el = document.createElement('div');
     el.className = 'recent-item';
-    el.innerHTML = `<span class="recent-icon">📄</span><span class="recent-name">${escapeHtml(item.name)}</span><span class="recent-path">${escapeHtml(item.path)}</span>`;
-    el.addEventListener('dblclick', async () => {
+    const iconHtml = renderFileIcon(item.name, false);
+    const color = getFileColor(item.name);
+    el.innerHTML = `<span class="recent-icon">${iconHtml}</span><span class="recent-name" style="color:${color}">${escapeHtml(item.name)}</span><span class="recent-path">${escapeHtml(item.path)}</span>`;
+    el.addEventListener('click', async () => {
       const existing = state.tabs.find(t => t.path === item.path);
       if (existing) { switchToTab(existing.id); return; }
       try {
@@ -429,6 +474,7 @@ function createEditorView(content, language, options = {}) {
           tab.modified = true;
           updateTabUI(tab);
           scheduleAutoSave(tab.id);
+          scheduleRealtimePanelsRefresh();
         }
       }
       if (update.selectionSet || update.docChanged) {
@@ -545,10 +591,10 @@ function renderTab(tab) {
   const tabFileColor = getFileColor(tab.name);
   const tabIcon = renderFileIcon(tab.name, false);
   el.innerHTML = `
-    ${tab.pinned ? '<span class="tab-pin">📌</span>' : '<span class="tab-modified"></span>'}
+    ${tab.pinned ? '<span class="tab-pin">◈</span>' : '<span class="tab-modified"></span>'}
     <span class="tab-icon">${tabIcon}</span>
     <span class="tab-name" style="color:${tabFileColor}">${escapeHtml(tab.name)}</span>
-    ${tab.pinned ? '' : '<span class="tab-close">×</span>'}
+    ${tab.pinned ? '' : '<span class="tab-close">\u00D7</span>'}
   `;
 
   el.addEventListener('click', (e) => {
@@ -759,14 +805,21 @@ function showEditor(id) {
   updateQueryBar(tab);
   applyQueryViewEffects(tab);
   renderSecurityBannerDebounced(tab, container);
+  if (outlinePanelOpen) renderOutlinePanel(tab);
+  updateTrustBadge();
 }
 
-function renderJsonTree(tab, container) {
+async function renderJsonTree(tab, container) {
   const source = getTabSourceContent(tab);
   try {
     const data = JSON.parse(source);
     container.innerHTML = `<div class="json-viewer-container"></div>`;
-    const viewer = new JsonViewer(container.querySelector('.json-viewer-container'));
+    const host = container.querySelector('.json-viewer-container');
+    if (!host) return;
+    const { JsonViewer } = await loadJsonViewerModule();
+    // Guard against stale async render after tab switch
+    if (state.activeTabId !== tab.id || !host.isConnected) return;
+    const viewer = new JsonViewer(host);
     viewer.render(data);
   } catch (e) {
     console.error('JSON Render Error:', e);
@@ -777,11 +830,16 @@ function renderJsonTree(tab, container) {
   }
 }
 
-function renderCsvTable(tab, container) {
+async function renderCsvTable(tab, container) {
   try {
     const source = getTabSourceContent(tab);
     container.innerHTML = `<div class="csv-viewer-container"></div>`;
-    const viewer = new CsvViewer(container.querySelector('.csv-viewer-container'));
+    const host = container.querySelector('.csv-viewer-container');
+    if (!host) return;
+    const { CsvViewer } = await loadCsvViewerModule();
+    // Guard against stale async render after tab switch
+    if (state.activeTabId !== tab.id || !host.isConnected) return;
+    const viewer = new CsvViewer(host);
     viewer.render(source);
   } catch (e) {
     console.error('CSV Render Error:', e);
@@ -833,17 +891,18 @@ function closeTab(id) {
       if (result === 'save') {
         state.activeTabId = tab.id;
         syncTabContentFromEditor(tab);
-        if (!tab.path) {
-          try {
-            const selected = await save({ filters: [{ name: 'All Files', extensions: ['*'] }] });
-            if (!selected) return;
-            const filePath = typeof selected === 'string' ? selected : selected.path;
-            await invoke('save_file', { path: filePath, content: tab.content });
-          } catch (err) { console.error('Save error:', err); return; }
-        } else {
-          try { await invoke('save_file', { path: tab.path, content: tab.content }); }
-          catch (err) { console.error('Save error:', err); return; }
-        }
+          if (!tab.path) {
+            try {
+              const selected = await save({ filters: [{ name: 'All Files', extensions: ['*'] }] });
+              if (!selected) return;
+              const filePath = typeof selected === 'string' ? selected : selected.path;
+              await safeSaveToPath(filePath, tab.content);
+              tab.path = filePath;
+            } catch (err) { console.error('Save error:', err); return; }
+          } else {
+            try { await safeSaveToPath(tab.path, tab.content); }
+            catch (err) { console.error('Save error:', err); return; }
+          }
         doCloseTab(id);
       } else if (result === 'dont-save') {
         doCloseTab(id);
@@ -859,7 +918,10 @@ function doCloseTab(id) {
   if (idx === -1) return;
   const tab = state.tabs[idx];
   if (tab.editorView) { tab.editorView.destroy(); tab.editorView = null; }
-  if (autoSaveTimers[id]) clearTimeout(autoSaveTimers[id]);
+  if (autoSaveTimers[id]) {
+    clearTimeout(autoSaveTimers[id]);
+    delete autoSaveTimers[id];
+  }
   state.tabs.splice(idx, 1);
   document.querySelector(`.tab[data-id="${id}"]`)?.remove();
 
@@ -908,15 +970,15 @@ function showTabContextMenu(x, y, tabId) {
   menu.className = 'context-menu';
 
   const items = [
-    { label: tab.pinned ? '📌 Unpin Tab' : '📌 Pin Tab', action: () => togglePinTab(tabId) },
+    { label: tab.pinned ? '◈ Unpin Tab' : '◈ Pin Tab', action: () => togglePinTab(tabId) },
     { label: '─', separator: true },
-    { label: '✕ Close', action: () => closeTab(tabId) },
-    { label: '✕ Close Others', action: () => closeOtherTabs(tabId) },
-    { label: '✕ Close All', action: () => closeAllTabs() },
-    { label: '✕ Close to the Right', action: () => closeTabsToRight(tabId) },
+    { label: '× Close', action: () => closeTab(tabId) },
+    { label: '× Close Others', action: () => closeOtherTabs(tabId) },
+    { label: '× Close All', action: () => closeAllTabs() },
+    { label: '× Close to the Right', action: () => closeTabsToRight(tabId) },
     { label: '─', separator: true },
-    { label: '📋 Copy Path', action: () => { if (tab.path) navigator.clipboard.writeText(tab.path); } },
-    { label: '📋 Copy Name', action: () => navigator.clipboard.writeText(tab.name) },
+    { label: '⎘ Copy Path', action: () => { if (tab.path) navigator.clipboard.writeText(tab.path); } },
+    { label: '⎘ Copy Name', action: () => navigator.clipboard.writeText(tab.name) },
   ];
 
   items.forEach(item => {
@@ -950,32 +1012,42 @@ function hideTabContextMenu() {
 
 async function closeOtherTabs(keepId) {
   const toClose = state.tabs.filter(t => t.id !== keepId && !t.pinned).map(t => t.id);
+  const errors = [];
   for (const id of toClose) {
-    await closeTabAsync(id);
+    const result = await closeTabAsync(id);
+    if (result.error) errors.push(result.error);
   }
+  if (errors.length) console.warn(`closeOtherTabs: ${errors.length} tab(s) failed`, errors);
 }
 
 async function closeAllTabs() {
   const toClose = state.tabs.filter(t => !t.pinned).map(t => t.id);
+  const errors = [];
   for (const id of toClose) {
-    await closeTabAsync(id);
+    const result = await closeTabAsync(id);
+    if (result.error) errors.push(result.error);
   }
+  if (errors.length) console.warn(`closeAllTabs: ${errors.length} tab(s) failed`, errors);
 }
 
 async function closeTabsToRight(fromId) {
   const idx = state.tabs.findIndex(t => t.id === fromId);
   if (idx < 0) return;
   const toClose = state.tabs.slice(idx + 1).filter(t => !t.pinned).map(t => t.id);
+  const errors = [];
   for (const id of toClose) {
-    await closeTabAsync(id);
+    const result = await closeTabAsync(id);
+    if (result.error) errors.push(result.error);
   }
+  if (errors.length) console.warn(`closeTabsToRight: ${errors.length} tab(s) failed`, errors);
 }
 
-// Async version of closeTab that can be awaited for sequential bulk close
+// Async version of closeTab that can be awaited for sequential bulk close.
+// Returns { closed: boolean, error?: string } so callers can detect failures.
 function closeTabAsync(id) {
   return new Promise((resolve) => {
     const tab = state.tabs.find(t => t.id === id);
-    if (!tab) { resolve(); return; }
+    if (!tab) { resolve({ closed: false }); return; }
     if (tab.modified) {
       showCloseDialog(tab).then(async (result) => {
         if (result === 'save') {
@@ -984,23 +1056,35 @@ function closeTabAsync(id) {
           if (!tab.path) {
             try {
               const selected = await save({ filters: [{ name: 'All Files', extensions: ['*'] }] });
-              if (!selected) { resolve(); return; }
+              if (!selected) { resolve({ closed: false }); return; }
               const filePath = typeof selected === 'string' ? selected : selected.path;
-              await invoke('save_file', { path: filePath, content: tab.content });
-            } catch (err) { console.error('Save error:', err); resolve(); return; }
+              await safeSaveToPath(filePath, tab.content);
+              tab.path = filePath;
+            } catch (err) {
+              console.error('Save error:', err);
+              resolve({ closed: false, error: err.message });
+              return;
+            }
           } else {
-            try { await invoke('save_file', { path: tab.path, content: tab.content }); }
-            catch (err) { console.error('Save error:', err); resolve(); return; }
+            try { await safeSaveToPath(tab.path, tab.content); }
+            catch (err) {
+              console.error('Save error:', err);
+              resolve({ closed: false, error: err.message });
+              return;
+            }
           }
           doCloseTab(id);
+          resolve({ closed: true });
         } else if (result === 'dont-save') {
           doCloseTab(id);
+          resolve({ closed: true });
+        } else {
+          resolve({ closed: false });
         }
-        resolve();
       });
     } else {
       doCloseTab(id);
-      resolve();
+      resolve({ closed: true });
     }
   });
 }
@@ -1362,7 +1446,7 @@ function highlightJsonPathInTree(pathTokens) {
       const closePreview = ownerNode?.querySelector(':scope > .json-line > .json-close-preview');
       if (arrow) {
         arrow.classList.add('expanded');
-        arrow.textContent = '▼';
+        arrow.textContent = '\u25BC';
       }
       if (size) size.classList.remove('visible');
       if (closePreview) closePreview.classList.add('hidden');
@@ -1618,7 +1702,7 @@ function updateQueryBar(tab) {
   if (query.error) {
     meta.textContent = query.error;
   } else if (query.busy) {
-    meta.textContent = jsonMode ? 'Locating path…' : 'Filtering…';
+    meta.textContent = jsonMode ? 'Locating path\u2026' : 'Filtering\u2026';
   } else if (query.active && query.resultCount !== null) {
     if (jsonMode && query.resultCount > 0 && Array.isArray(query.pathTokens) && query.pathTokens.length > 0) {
       const precise = query.locateResult;
@@ -1777,12 +1861,20 @@ function closeAnalysisModal() {
   document.getElementById('analysis-overlay')?.remove();
 }
 
-function showDataAnalysis() {
+async function showDataAnalysis() {
   const tab = state.tabs.find(t => t.id === state.activeTabId);
   if (!tab) return;
 
   syncTabContentFromEditor(tab);
 
+  let DataAnalyzer;
+  try {
+    ({ DataAnalyzer } = await loadDataAnalyzerModule());
+  } catch (err) {
+    console.error('Failed to load DataAnalyzer module:', err);
+    alert('Failed to open analyzer. Please try again.');
+    return;
+  }
   const result = DataAnalyzer.analyze(tab.content, tab.language || 'plaintext');
   closeAnalysisModal();
 
@@ -1934,6 +2026,10 @@ async function openFile() {
     if (existing) { switchToTab(existing.id); return; }
     const fileData = await invoke('read_file', { path: filePath });
     createTab(fileData);
+    const parts = filePath.split(/[\\/]/);
+    parts.pop();
+    trustManager.setCurrentWorktree(parts.join('\\'));
+    updateTrustBadge();
   } catch (err) { console.error('Open file error:', err); }
 }
 
@@ -2014,6 +2110,9 @@ async function openFolder() {
     const entries = await invoke('list_directory', { path: folderPath });
     state.folderEntries = entries;
     renderFileTree(entries);
+    trustManager.setCurrentWorktree(folderPath);
+    updateTrustBadge();
+    await loadWorkspaceExtensions();
   } catch (err) { console.error('Open folder error:', err); }
 }
 
@@ -2032,7 +2131,7 @@ function renderFileTree(entries, container, depth) {
 
     if (entry.is_dir) {
       const arrow = document.createElement('span');
-      arrow.className = 'tree-arrow'; arrow.textContent = '▶';
+      arrow.className = 'tree-arrow'; arrow.textContent = '\u25B6';
       const iconSpan = document.createElement('span');
       iconSpan.className = 'tree-icon'; iconSpan.innerHTML = iconHtml;
       const nameSpan = document.createElement('span');
@@ -2074,147 +2173,146 @@ function renderFileTree(entries, container, depth) {
 }
 
 // ─── File Icon & Color System (Zed-inspired) ───
+// Muted, theme-harmonious palette on Sand dark background
 const FILE_TYPE_MAP = {
   // JavaScript / TypeScript
-  js: { icon: 'JS', color: '#f7df1e', group: 'script' },
-  mjs: { icon: 'MJ', color: '#f7df1e', group: 'script' },
-  cjs: { icon: 'CJ', color: '#f7df1e', group: 'script' },
-  jsx: { icon: 'JX', color: '#61dafb', group: 'script' },
-  ts: { icon: 'TS', color: '#3178c6', group: 'script' },
-  tsx: { icon: 'TX', color: '#3178c6', group: 'script' },
-  vue: { icon: 'V', color: '#42b883', group: 'script' },
-  svelte: { icon: 'SV', color: '#ff3e00', group: 'script' },
+  js: { icon: 'JS', color: '#e0c872', group: 'script' },
+  mjs: { icon: 'MJ', color: '#e0c872', group: 'script' },
+  cjs: { icon: 'CJ', color: '#e0c872', group: 'script' },
+  jsx: { icon: 'JX', color: '#7cc4e0', group: 'script' },
+  ts: { icon: 'TS', color: '#6e9de0', group: 'script' },
+  tsx: { icon: 'TX', color: '#6e9de0', group: 'script' },
+  vue: { icon: 'VU', color: '#6dba8a', group: 'script' },
+  svelte: { icon: 'SV', color: '#e07850', group: 'script' },
 
   // Systems
-  rs: { icon: 'RS', color: '#dea584', group: 'script' },
-  go: { icon: 'GO', color: '#00add8', group: 'script' },
-  c: { icon: 'C', color: '#555555', group: 'script' },
-  cpp: { icon: 'C+', color: '#f34b7d', group: 'script' },
-  h: { icon: 'H', color: '#a074c4', group: 'script' },
-  hpp: { icon: 'H+', color: '#a074c4', group: 'script' },
-  cs: { icon: 'C#', color: '#178600', group: 'script' },
+  rs: { icon: 'RS', color: '#d4a07a', group: 'script' },
+  go: { icon: 'GO', color: '#62b5cf', group: 'script' },
+  c: { icon: 'C', color: '#8a8f98', group: 'script' },
+  cpp: { icon: 'C+', color: '#c47a8f', group: 'script' },
+  h: { icon: 'H', color: '#9a86b8', group: 'script' },
+  hpp: { icon: 'H+', color: '#9a86b8', group: 'script' },
+  cs: { icon: 'C#', color: '#6da86d', group: 'script' },
 
   // Scripting
-  py: { icon: 'PY', color: '#3572a5', group: 'script' },
-  rb: { icon: 'RB', color: '#cc342d', group: 'script' },
-  php: { icon: 'PH', color: '#4f5d95', group: 'script' },
-  java: { icon: 'JA', color: '#b07219', group: 'script' },
-  kt: { icon: 'KT', color: '#a97bff', group: 'script' },
-  swift: { icon: 'SW', color: '#f05138', group: 'script' },
-  dart: { icon: 'DA', color: '#00b4ab', group: 'script' },
-  lua: { icon: 'LU', color: '#000080', group: 'script' },
-  r: { icon: 'R', color: '#198ce7', group: 'script' },
-  scala: { icon: 'SC', color: '#dc322f', group: 'script' },
-  zig: { icon: 'ZG', color: '#ec915c', group: 'script' },
+  py: { icon: 'PY', color: '#6889bf', group: 'script' },
+  rb: { icon: 'RB', color: '#c46a62', group: 'script' },
+  php: { icon: 'PH', color: '#7a80a8', group: 'script' },
+  java: { icon: 'JV', color: '#c49058', group: 'script' },
+  kt: { icon: 'KT', color: '#a588d4', group: 'script' },
+  swift: { icon: 'SW', color: '#d4724a', group: 'script' },
+  dart: { icon: 'DA', color: '#5cb5a8', group: 'script' },
+  lua: { icon: 'LU', color: '#6872b0', group: 'script' },
+  r: { icon: 'R', color: '#5e9fd4', group: 'script' },
+  scala: { icon: 'SC', color: '#c45858', group: 'script' },
+  zig: { icon: 'ZG', color: '#d49a68', group: 'script' },
 
   // Web
-  html: { icon: '', color: '#e34c26', group: 'web' },
-  htm: { icon: '', color: '#e34c26', group: 'web' },
-  css: { icon: '', color: '#563d7c', group: 'style' },
-  scss: { icon: '', color: '#c6538c', group: 'style' },
-  sass: { icon: '', color: '#c6538c', group: 'style' },
-  less: { icon: '', color: '#1d365d', group: 'style' },
+  html: { icon: 'HT', color: '#cf7048', group: 'web' },
+  htm: { icon: 'HT', color: '#cf7048', group: 'web' },
+  css: { icon: 'CS', color: '#7a6aaf', group: 'style' },
+  scss: { icon: 'SS', color: '#b86a90', group: 'style' },
+  sass: { icon: 'SA', color: '#b86a90', group: 'style' },
+  less: { icon: 'LE', color: '#5a72a0', group: 'style' },
 
   // Data
-  json: { icon: '{}', color: '#f7df1e', group: 'data' },
-  jsonc: { icon: '{}', color: '#f7df1e', group: 'data' },
-  json5: { icon: '{}', color: '#f7df1e', group: 'data' },
-  xml: { icon: '<>', color: '#e37933', group: 'data' },
-  csv: { icon: ',,', color: '#237346', group: 'data' },
-  tsv: { icon: '⇥', color: '#237346', group: 'data' },
-  sql: { icon: 'SQ', color: '#e38c00', group: 'data' },
-  graphql: { icon: 'GQ', color: '#e535ab', group: 'data' },
-  prisma: { icon: 'PR', color: '#2d3748', group: 'data' },
+  json: { icon: 'JS', color: '#c4b060', group: 'data' },
+  jsonc: { icon: 'JC', color: '#c4b060', group: 'data' },
+  json5: { icon: 'J5', color: '#c4b060', group: 'data' },
+  xml: { icon: 'XM', color: '#c48a52', group: 'data' },
+  csv: { icon: 'CV', color: '#5a9a68', group: 'data' },
+  tsv: { icon: 'TV', color: '#5a9a68', group: 'data' },
+  sql: { icon: 'SQ', color: '#c4a050', group: 'data' },
+  graphql: { icon: 'GQ', color: '#b868a0', group: 'data' },
+  prisma: { icon: 'PR', color: '#6a7a90', group: 'data' },
 
   // Config
-  yaml: { icon: 'YA', color: '#cb171e', group: 'config' },
-  yml: { icon: 'YA', color: '#cb171e', group: 'config' },
-  toml: { icon: 'TM', color: '#9c4221', group: 'config' },
-  ini: { icon: 'IN', color: '#a074c4', group: 'config' },
-  env: { icon: 'EN', color: '#ecd53f', group: 'config' },
-  properties: { icon: 'PR', color: '#2d6cdf', group: 'config' },
+  yaml: { icon: 'YM', color: '#b85858', group: 'config' },
+  yml: { icon: 'YM', color: '#b85858', group: 'config' },
+  toml: { icon: 'TM', color: '#a87050', group: 'config' },
+  ini: { icon: 'IN', color: '#8a80a8', group: 'config' },
+  env: { icon: 'EN', color: '#c4b468', group: 'config' },
+  properties: { icon: 'PP', color: '#6888b8', group: 'config' },
 
   // Shell
-  sh: { icon: '$_', color: '#89e051', group: 'shell' },
-  bash: { icon: '$_', color: '#89e051', group: 'shell' },
-  zsh: { icon: '$_', color: '#89e051', group: 'shell' },
-  fish: { icon: '$_', color: '#89e051', group: 'shell' },
-  bat: { icon: '>_', color: '#c1f12e', group: 'shell' },
-  cmd: { icon: '>_', color: '#c1f12e', group: 'shell' },
-  ps1: { icon: 'PS', color: '#012456', group: 'shell' },
+  sh: { icon: 'SH', color: '#88b868', group: 'shell' },
+  bash: { icon: 'SH', color: '#88b868', group: 'shell' },
+  zsh: { icon: 'SH', color: '#88b868', group: 'shell' },
+  fish: { icon: 'FI', color: '#88b868', group: 'shell' },
+  bat: { icon: 'BT', color: '#a0b850', group: 'shell' },
+  cmd: { icon: 'CM', color: '#a0b850', group: 'shell' },
+  ps1: { icon: 'PS', color: '#5068a0', group: 'shell' },
 
   // Docs
-  md: { icon: 'M↓', color: '#083fa1', group: 'doc' },
-  mdx: { icon: 'MX', color: '#083fa1', group: 'doc' },
-  txt: { icon: 'Tx', color: '#a9b1d6', group: 'doc' },
-  rst: { icon: 'RS', color: '#141414', group: 'doc' },
-  tex: { icon: 'TX', color: '#3d6117', group: 'doc' },
+  md: { icon: 'MD', color: '#5878b0', group: 'doc' },
+  mdx: { icon: 'MX', color: '#5878b0', group: 'doc' },
+  txt: { icon: 'TX', color: '#8a8880', group: 'doc' },
+  rst: { icon: 'RS', color: '#7a7870', group: 'doc' },
+  tex: { icon: 'TX', color: '#608048', group: 'doc' },
 
   // Log
-  log: { icon: '▤', color: '#e0af68', group: 'log' },
+  log: { icon: 'LG', color: '#c4a060', group: 'log' },
 
   // Images
-  png: { icon: '◻', color: '#a074c4', group: 'image' },
-  jpg: { icon: '◻', color: '#a074c4', group: 'image' },
-  jpeg: { icon: '◻', color: '#a074c4', group: 'image' },
-  gif: { icon: '◻', color: '#a074c4', group: 'image' },
-  webp: { icon: '◻', color: '#a074c4', group: 'image' },
-  svg: { icon: '◇', color: '#ff9a00', group: 'image' },
-  ico: { icon: '◻', color: '#a074c4', group: 'image' },
+  png: { icon: 'PN', color: '#9080b0', group: 'image' },
+  jpg: { icon: 'JP', color: '#9080b0', group: 'image' },
+  jpeg: { icon: 'JP', color: '#9080b0', group: 'image' },
+  gif: { icon: 'GF', color: '#9080b0', group: 'image' },
+  webp: { icon: 'WP', color: '#9080b0', group: 'image' },
+  svg: { icon: 'SV', color: '#c49050', group: 'image' },
+  ico: { icon: 'IC', color: '#9080b0', group: 'image' },
 
   // Binary / Archive
-  zip: { icon: '⊞', color: '#e38c00', group: 'archive' },
-  tar: { icon: '⊞', color: '#e38c00', group: 'archive' },
-  gz: { icon: '⊞', color: '#e38c00', group: 'archive' },
-  pdf: { icon: 'PF', color: '#ec2025', group: 'archive' },
-  wasm: { icon: 'WA', color: '#654ff0', group: 'binary' },
+  zip: { icon: 'ZP', color: '#b09050', group: 'archive' },
+  tar: { icon: 'TR', color: '#b09050', group: 'archive' },
+  gz: { icon: 'GZ', color: '#b09050', group: 'archive' },
+  pdf: { icon: 'PD', color: '#c46060', group: 'archive' },
+  wasm: { icon: 'WA', color: '#7868c0', group: 'binary' },
 
   // Lock / Generated
-  lock: { icon: '🔒', color: '#565f89', group: 'lock' },
-  map: { icon: '◎', color: '#565f89', group: 'generated' },
-  min: { icon: '▬', color: '#565f89', group: 'generated' },
+  lock: { icon: 'LK', color: '#686878', group: 'lock' },
+  map: { icon: 'MP', color: '#686878', group: 'generated' },
+  min: { icon: 'MN', color: '#686878', group: 'generated' },
 
   // Git
-  gitignore: { icon: 'GI', color: '#f05032', group: 'git' },
-  gitattributes: { icon: 'GA', color: '#f05032', group: 'git' },
+  gitignore: { icon: 'GI', color: '#c47050', group: 'git' },
+  gitattributes: { icon: 'GA', color: '#c47050', group: 'git' },
 
   // Docker / CI
-  dockerfile: { icon: '🐋', color: '#384d54', group: 'devops' },
-  dockerignore: { icon: 'DI', color: '#384d54', group: 'devops' },
+  dockerfile: { icon: 'DK', color: '#5a8098', group: 'devops' },
+  dockerignore: { icon: 'DI', color: '#5a8098', group: 'devops' },
 };
 
 // Special full-name matches
 const FILE_NAME_MAP = {
-  'package.json': { icon: '{}', color: '#cb3837', group: 'config' },
-  'tsconfig.json': { icon: 'TS', color: '#3178c6', group: 'config' },
-  'vite.config.js': { icon: '⚡', color: '#646cff', group: 'config' },
-  'webpack.config.js': { icon: 'WP', color: '#8dd6f9', group: 'config' },
-  'Cargo.toml': { icon: '🦀', color: '#dea584', group: 'config' },
-  'Cargo.lock': { icon: '🔒', color: '#dea584', group: 'lock' },
-  'Makefile': { icon: 'MK', color: '#427819', group: 'config' },
-  'Dockerfile': { icon: '🐋', color: '#384d54', group: 'devops' },
-  'LICENSE': { icon: '§', color: '#d4a52a', group: 'doc' },
-  'README.md': { icon: '📖', color: '#083fa1', group: 'doc' },
-  '.env': { icon: 'EN', color: '#ecd53f', group: 'config' },
-  '.gitignore': { icon: 'GI', color: '#f05032', group: 'git' },
+  'package.json': { icon: 'PK', color: '#c46050', group: 'config' },
+  'tsconfig.json': { icon: 'TS', color: '#6e9de0', group: 'config' },
+  'vite.config.js': { icon: 'VT', color: '#8080cf', group: 'config' },
+  'webpack.config.js': { icon: 'WP', color: '#7ab0d0', group: 'config' },
+  'Cargo.toml': { icon: 'CR', color: '#d4a07a', group: 'config' },
+  'Cargo.lock': { icon: 'CL', color: '#a08868', group: 'lock' },
+  'Makefile': { icon: 'MK', color: '#6a9050', group: 'config' },
+  'Dockerfile': { icon: 'DK', color: '#5a8098', group: 'devops' },
+  'LICENSE': { icon: 'LI', color: '#c4a858', group: 'doc' },
+  'README.md': { icon: 'RM', color: '#5878b0', group: 'doc' },
+  '.env': { icon: 'EN', color: '#c4b468', group: 'config' },
+  '.gitignore': { icon: 'GI', color: '#c47050', group: 'git' },
 };
 
 function getFileIcon(name, isDir) {
-  if (isDir) return { icon: '📁', color: '#7aa2f7', group: 'dir' };
+  if (isDir) return { icon: '▸', color: '#7aa2f7', group: 'dir' };
   // Check full name match first
   const nameMatch = FILE_NAME_MAP[name];
   if (nameMatch) return nameMatch;
   // Then extension
   const ext = name.split('.').pop().toLowerCase();
-  return FILE_TYPE_MAP[ext] || { icon: '📄', color: '#a9b1d6', group: 'file' };
+  return FILE_TYPE_MAP[ext] || { icon: '▣', color: '#a9b1d6', group: 'file' };
 }
 
 function renderFileIcon(name, isDir) {
   const { icon, color } = getFileIcon(name, isDir);
-  if (icon.length <= 2 && !icon.includes('📁') && !icon.includes('📄') && !icon.includes('🦀') && !icon.includes('🐋') && !icon.includes('⚡') && !icon.includes('📖') && !icon.includes('🔒')) {
-    return `<span class="file-icon-badge" style="--fi-color:${color}">${icon}</span>`;
-  }
-  return icon;
+  const safe = icon.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return `<span class="file-icon-badge" style="--fi-color:${color}">${safe}</span>`;
 }
 
 function getFileColor(name) {
@@ -2313,6 +2411,358 @@ function formatLanguage(lang) {
   return names[lang] || lang || 'Plain Text';
 }
 
+function createScratchTab(name, content, language = 'plaintext') {
+  state.untitledCounter++;
+  const id = ++tabIdCounter;
+  const text = String(content || '');
+  const tab = {
+    id,
+    path: null,
+    name: `${name}-${state.untitledCounter}`,
+    content: text,
+    encoding: 'UTF-8',
+    language,
+    lineEnding: 'LF',
+    size: new Blob([text]).size,
+    modified: false,
+    pinned: false,
+    readOnly: false,
+    largeFileMode: false,
+    progressive: false,
+    fullContent: null,
+    loadedChars: 0,
+    query: {
+      text: '',
+      active: false,
+      busy: false,
+      previewContent: null,
+      resultCount: null,
+      totalCount: null,
+      error: '',
+      pathTokens: null,
+      locateResult: null,
+      clauseCount: 0,
+      termCount: 0,
+      clauses: [],
+      pathCatalogSignature: '',
+      pathCatalog: [],
+    },
+    editorView: null,
+    virtual: true,
+  };
+  state.tabs.push(tab);
+  renderTab(tab);
+  switchToTab(id);
+  document.getElementById('welcome-screen').classList.add('hidden');
+  updateStatusBar(tab);
+  return tab;
+}
+
+function getCurrentWorktreePath() {
+  if (state.folderPath) return state.folderPath;
+  const active = state.tabs.find((t) => t.id === state.activeTabId);
+  if (!active?.path) return '';
+  const parts = active.path.split(/[\\/]/);
+  if (parts.length <= 1) return active.path;
+  parts.pop();
+  return parts.join('\\') || active.path;
+}
+
+function jumpToTabLine(tabId, line) {
+  switchToTab(tabId);
+  const tab = state.tabs.find((t) => t.id === tabId);
+  if (!tab?.editorView) return;
+  const doc = tab.editorView.state.doc;
+  const target = doc.line(Math.min(Math.max(1, line), doc.lines));
+  tab.editorView.dispatch({ selection: { anchor: target.from }, scrollIntoView: true });
+  tab.editorView.focus();
+}
+
+// \u2500\u2500\u2500 In-App Dialog \u2500\u2500\u2500
+function showAppDialog({ title, message, hint, confirmLabel = 'OK', cancelLabel = 'Cancel', danger = false }) {
+  return new Promise((resolve) => {
+    const existing = document.getElementById('app-dialog-overlay');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'app-dialog-overlay';
+    overlay.className = 'dialog-overlay';
+
+    const box = document.createElement('div');
+    box.className = 'dialog-box';
+
+    const h3 = document.createElement('h3');
+    h3.textContent = title;
+    box.appendChild(h3);
+
+    if (message) {
+      const msg = document.createElement('div');
+      msg.className = 'dialog-message';
+      msg.textContent = message;
+      box.appendChild(msg);
+    }
+
+    if (hint) {
+      const h = document.createElement('div');
+      h.className = 'dialog-hint';
+      h.textContent = hint;
+      box.appendChild(h);
+    }
+
+    const buttons = document.createElement('div');
+    buttons.className = 'dialog-buttons';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'dialog-btn secondary';
+    cancelBtn.textContent = cancelLabel;
+    cancelBtn.addEventListener('click', () => { overlay.remove(); resolve(false); });
+
+    const confirmBtn = document.createElement('button');
+    confirmBtn.className = danger ? 'dialog-btn danger' : 'dialog-btn primary';
+    confirmBtn.textContent = confirmLabel;
+    confirmBtn.addEventListener('click', () => { overlay.remove(); resolve(true); });
+
+    buttons.appendChild(cancelBtn);
+    buttons.appendChild(confirmBtn);
+    box.appendChild(buttons);
+    overlay.appendChild(box);
+
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) { overlay.remove(); resolve(false); }
+    });
+
+    document.body.appendChild(overlay);
+    confirmBtn.focus();
+  });
+}
+
+function updateTrustBadge() {
+  let badge = document.getElementById('trust-status-badge');
+  if (!badge) {
+    badge = document.createElement('button');
+    badge.id = 'trust-status-badge';
+    badge.className = 'trust-status-badge';
+    badge.addEventListener('click', async () => {
+      const current = getCurrentWorktreePath();
+      if (!current) {
+        await showAppDialog({ title: 'No Workspace', message: 'Open a folder or file first.', confirmLabel: 'OK', cancelLabel: '' });
+        return;
+      }
+      if (trustManager.isTrusted(current)) {
+        const yes = await showAppDialog({
+          title: 'Remove Trust?',
+          message: `This workspace is currently trusted.`,
+          hint: current,
+          confirmLabel: 'Remove Trust',
+          danger: true,
+        });
+        if (yes) {
+          trustManager.untrustPath(current);
+          unloadWorkspaceExtensions();
+          updateTrustBadge();
+        }
+      } else {
+        const yes = await showAppDialog({
+          title: 'Trust This Workspace?',
+          message: `This enables tasks and extensions for:`,
+          hint: current,
+          confirmLabel: 'Trust',
+        });
+        if (yes) {
+          trustManager.trustPath(current);
+          updateTrustBadge();
+          await loadWorkspaceExtensions();
+        }
+      }
+    });
+    document.querySelector('.titlebar-right')?.prepend(badge);
+  }
+
+  const current = getCurrentWorktreePath();
+  trustManager.setCurrentWorktree(current);
+  const trusted = current ? trustManager.isTrusted(current) : false;
+  badge.textContent = trusted ? 'Trusted' : 'Restricted';
+  badge.classList.toggle('restricted', !trusted);
+  badge.classList.toggle('trusted', trusted);
+  badge.title = trusted ? 'Workspace trusted' : 'Workspace restricted — click to trust';
+}
+
+async function requireTrustedForAction(actionLabel) {
+  const current = getCurrentWorktreePath();
+  if (!current) {
+    await showAppDialog({ title: 'No Workspace', message: `${actionLabel} requires an open workspace.`, confirmLabel: 'OK', cancelLabel: '' });
+    return false;
+  }
+  trustManager.setCurrentWorktree(current);
+  if (trustManager.isTrusted(current)) return true;
+  const answer = await showAppDialog({
+    title: `${actionLabel} Blocked`,
+    message: `This action is blocked in Restricted mode. Trust this workspace to continue?`,
+    hint: current,
+    confirmLabel: 'Trust & Continue',
+  });
+  if (answer) {
+    trustManager.trustPath(current);
+    updateTrustBadge();
+    return true;
+  }
+  return false;
+}
+
+function setDiagnosticsSeverityFilter(filter) {
+  state.diagnosticsSeverityFilter = filter;
+  localStorage.setItem('crabtree-diagnostics-severity', filter);
+  const active = state.tabs.find((t) => t.id === state.activeTabId);
+  if (active) showEditor(active.id);
+}
+
+function collectTabDiagnostics(tab) {
+  const content = tab.editorView ? tab.editorView.state.doc.toString() : (tab.content || '');
+  const diagnostics = collectDiagnostics(content, tab.language || 'plaintext');
+  return diagnostics.filter((d) => passesDiagnosticsFilter(d.severity));
+}
+
+function flattenEntries(entries, out = []) {
+  if (!entries) return out;
+  for (const e of entries) {
+    out.push(e);
+    if (e.is_dir && e.children) flattenEntries(e.children, out);
+  }
+  return out;
+}
+
+function unloadWorkspaceExtensions() {
+  const cmds = extensionHost.getCommands();
+  for (const cmd of cmds) {
+    commandPalette.unregister(`ext:${cmd.id}`);
+  }
+  extensionHost.clearLoaded();
+}
+
+async function loadWorkspaceExtensions() {
+  // Always clear stale extension commands before (re)loading
+  unloadWorkspaceExtensions();
+
+  if (!state.folderEntries) return;
+  trustManager.setCurrentWorktree(getCurrentWorktreePath());
+  if (!trustManager.isTrusted()) {
+    console.log('Skipping extension load: workspace restricted');
+    return;
+  }
+  try {
+    const entries = flattenEntries(state.folderEntries, []);
+    const manifests = entries
+      .filter((e) => !e.is_dir && (e.name.endsWith('.crabext.json') || e.name.endsWith('.crabtree-ext.json')))
+      .map((e) => e.path);
+
+    if (manifests.length === 0) return;
+    const loaded = await extensionHost.loadFromFilePaths(manifests);
+    for (const cmd of extensionHost.getCommands()) {
+      commandPalette.register(
+        `ext:${cmd.id}`,
+        `Extension: ${cmd.extensionTitle} — ${cmd.label}`,
+        () => executeExtensionCommand(cmd),
+      );
+    }
+    console.log(`Loaded ${loaded.length} extension manifest(s)`);
+  } catch (err) {
+    console.error('Failed to load workspace extensions:', err);
+  }
+}
+
+function resolveRelativePath(baseDir, maybeRelativePath) {
+  const p = String(maybeRelativePath || '');
+  if (!p) return '';
+  if (/^[A-Za-z]:\\/.test(p) || p.startsWith('/') || p.startsWith('\\\\')) return p;
+  const sep = baseDir?.includes('/') ? '/' : '\\';
+  const candidate = `${baseDir}${sep}${p}`.replace(/[\\/]+/g, sep);
+  if (candidate.includes('..')) {
+    console.warn(`Path contains traversal sequence, rejecting: ${candidate}`);
+    return '';
+  }
+  return candidate;
+}
+
+async function executeExtensionCommand(command) {
+  const missing = (command.capabilities || []).filter((c) => !extensionHost.hasCapabilities(command.extensionId, [c]));
+  if (missing.length > 0) {
+    const ok = confirm(
+      `Extension "${command.extensionTitle}" requests capabilities:\n\n${missing.join('\n')}\n\nGrant and continue?`,
+    );
+    if (!ok) return;
+    extensionHost.grantCapabilities(command.extensionId, missing);
+  }
+
+  if (command.type === 'task') {
+    if (!(await requireTrustedForAction('Extension task execution'))) return;
+    const payload = command.payload || {};
+    const args = Array.isArray(payload.args) ? payload.args : [];
+    const task = {
+      id: `ext:${command.id}`,
+      label: command.label,
+      command: payload.command || 'echo',
+      args,
+      cwd: payload.cwd || state.folderPath || null,
+    };
+    await runTaskFromPanel(task);
+    return;
+  }
+
+  if (command.type === 'snippet') {
+    const tab = state.tabs.find((t) => t.id === state.activeTabId);
+    if (!tab?.editorView) return;
+    const snippet = String(command.payload?.text || '');
+    const from = tab.editorView.state.selection.main.from;
+    const to = tab.editorView.state.selection.main.to;
+    tab.editorView.dispatch({
+      changes: { from, to, insert: snippet },
+      selection: { anchor: from + snippet.length },
+    });
+    return;
+  }
+
+  if (command.type === 'open_file') {
+    if (!(await requireTrustedForAction('Extension open_file'))) return;
+    const rawPath = String(command.payload?.path || '');
+    // Block absolute paths — extensions must use workspace-relative paths
+    if (/^[A-Za-z]:[\\\/]/.test(rawPath) || rawPath.startsWith('/') || rawPath.startsWith('\\\\')) {
+      alert(`Extension open_file blocked: absolute paths are not allowed. Use a workspace-relative path.`);
+      return;
+    }
+    const target = resolveRelativePath(state.folderPath || '', rawPath);
+    if (!target) return;
+    const pathCheck = isPathTraversalSafe(target);
+    if (!pathCheck.safe) {
+      alert(`Extension open_file blocked: ${pathCheck.reason}`);
+      return;
+    }
+    // Verify resolved path stays within workspace boundary
+    if (state.folderPath) {
+      const normTarget = target.replace(/\\/g, '/').toLowerCase();
+      const normFolder = state.folderPath.replace(/\\/g, '/').toLowerCase();
+      if (!normTarget.startsWith(normFolder)) {
+        alert(`Extension open_file blocked: path escapes workspace boundary.`);
+        return;
+      }
+    }
+    try {
+      await invoke('approve_path', { path: target });
+      const data = await invoke('read_file', { path: target });
+      createTab(data);
+    } catch (err) {
+      alert(`Extension open_file failed: ${err.message}`);
+    }
+    return;
+  }
+
+  if (command.type === 'message') {
+    alert(String(command.payload?.message || command.label));
+    return;
+  }
+
+  alert(`Unsupported extension command type: ${command.type}`);
+}
+
 // ─── Keyboard Shortcuts ───
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key === 'n') { e.preventDefault(); newFile(); }
@@ -2329,6 +2779,7 @@ document.addEventListener('keydown', (e) => {
     closeGlobalSearch();
     closeRegexBuilder();
     closeCheatsheet();
+    closeTaskPanel();
     if (closeDialogResolve) resolveCloseDialog('cancel');
   }
   if (e.ctrlKey && e.key === 'b') { e.preventDefault(); toggleSidebar(); }
@@ -2347,6 +2798,10 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.shiftKey && e.key === 'F') { e.preventDefault(); toggleGlobalSearch(); }
   // Problems panel
   if (e.ctrlKey && e.shiftKey && e.key === 'E') { e.preventDefault(); toggleProblemsPanel(); }
+  // Outline panel
+  if (e.ctrlKey && e.shiftKey && e.key === 'B') { e.preventDefault(); toggleOutlinePanel(); }
+  // Tasks panel
+  if (e.ctrlKey && e.shiftKey && e.key === 'T') { e.preventDefault(); toggleTaskPanel(); }
   // File finder
   if (e.ctrlKey && e.key === 'p') { e.preventDefault(); toggleFileFinder(); }
   // Minimap
@@ -2436,6 +2891,36 @@ commandPalette.register('query:save_current', 'Query: Save Current Filter', () =
 commandPalette.register('query:apply_latest_saved', 'Query: Apply Latest Saved Filter', () => applyMostRecentSavedFilter());
 commandPalette.register('search:global', 'Search: Find in All Tabs', () => toggleGlobalSearch(), 'Ctrl+Shift+F');
 commandPalette.register('tools:regex_builder', 'Tools: Regex Builder', () => toggleRegexBuilder());
+commandPalette.register('view:outline', 'View: Toggle Outline Panel', () => toggleOutlinePanel(), 'Ctrl+Shift+B');
+commandPalette.register('view:tasks', 'View: Toggle Task Panel', () => toggleTaskPanel(), 'Ctrl+Shift+T');
+commandPalette.register('task:rerun_last', 'Task: Rerun Last', async () => {
+  const last = taskRunner.getLastTaskId();
+  const task = taskRunner.getTemplates().find((t) => t.id === last);
+  if (!task) return alert('No previous task.');
+  if (!(await requireTrustedForAction('Task execution'))) return;
+  await runTaskFromPanel(task);
+});
+commandPalette.register('workspace:search_report', 'Investigation: Build Workspace From Search', () => openInvestigationWorkspaceFromGlobalSearch());
+commandPalette.register('workspace:problems_report', 'Investigation: Build Workspace From Problems', () => openInvestigationWorkspaceFromProblems());
+commandPalette.register('workspace:trust_current', 'Workspace: Trust Current Path', () => {
+  const current = getCurrentWorktreePath();
+  if (!current) return alert('Open a folder or file first.');
+  trustManager.trustPath(current);
+  updateTrustBadge();
+});
+commandPalette.register('workspace:clear_trust', 'Workspace: Clear Trusted Paths', async () => {
+  const yes = await showAppDialog({
+    title: 'Clear All Trust?',
+    message: 'This will revoke trust for all workspaces and unload extensions.',
+    confirmLabel: 'Clear All',
+    danger: true,
+  });
+  if (!yes) return;
+  trustManager.clearAllTrusted();
+  unloadWorkspaceExtensions();
+  updateTrustBadge();
+});
+commandPalette.register('extensions:reload', 'Extensions: Reload Workspace Extensions', () => loadWorkspaceExtensions());
 commandPalette.register('session:export', 'Session: Export Investigation', () => exportSession());
 commandPalette.register('session:import', 'Session: Import Investigation', () => importSession());
 commandPalette.register('session:clear', 'Session: Clear Saved Session', () => {
@@ -2491,8 +2976,9 @@ function openGlobalSearch() {
     overlay.innerHTML = `
       <div class="global-search-panel">
         <div class="global-search-header">
-          <h3>🔍 Find in All Tabs</h3>
-          <button class="dialog-btn secondary" id="global-search-close">✕</button>
+          <h3>\u2315 Find in All Tabs</h3>
+          <button class="dialog-btn secondary" id="global-search-workspace">Workspace</button>
+          <button class="dialog-btn secondary" id="global-search-close">×</button>
         </div>
         <div class="global-search-input-row">
           <input type="text" id="global-search-input" class="query-input" placeholder="Search text or /regex/i..." autocomplete="off" />
@@ -2505,6 +2991,7 @@ function openGlobalSearch() {
     document.body.appendChild(overlay);
 
     document.getElementById('global-search-close').addEventListener('click', closeGlobalSearch);
+    document.getElementById('global-search-workspace').addEventListener('click', () => openInvestigationWorkspaceFromGlobalSearch());
     overlay.addEventListener('click', (e) => { if (e.target === overlay) closeGlobalSearch(); });
 
     const input = document.getElementById('global-search-input');
@@ -2538,7 +3025,12 @@ function runGlobalSearch() {
   if (!input || !resultsDiv || !statusDiv) return;
 
   const query = input.value.trim();
-  if (!query) { resultsDiv.innerHTML = '<div class="empty-state">Type to search across all open tabs</div>'; statusDiv.textContent = ''; return; }
+  if (!query) {
+    latestGlobalSearchResults = [];
+    resultsDiv.innerHTML = '<div class="empty-state">Type to search across all open tabs</div>';
+    statusDiv.textContent = '';
+    return;
+  }
 
   const caseSensitive = document.getElementById('global-search-case')?.checked;
   let pattern, flags;
@@ -2567,10 +3059,11 @@ function runGlobalSearch() {
     content: t.content || (t.editorView ? t.editorView.state.doc.toString() : ''),
   })).filter(t => t.content);
 
-  statusDiv.textContent = 'Searching…';
+  statusDiv.textContent = 'Searching\u2026';
 
   // Run regex search in worker (auto-cancels previous search)
   workerBridge.regexSearch(tabsForWorker, pattern, flags).then(results => {
+    latestGlobalSearchResults = results;
     // Build highlight regex on main thread (safe — already validated)
     const highlightRe = new RegExp(pattern, flags.includes('g') ? flags : flags + 'g');
     let totalMatches = 0;
@@ -2595,14 +3088,7 @@ function runGlobalSearch() {
       el.addEventListener('click', () => {
         const tabId = parseInt(el.dataset.tabId);
         const line = parseInt(el.dataset.line);
-        switchToTab(tabId);
-        const tab = state.tabs.find(t => t.id === tabId);
-        if (tab?.editorView) {
-          const doc = tab.editorView.state.doc;
-          const targetLine = doc.line(Math.min(Math.max(1, line), doc.lines));
-          tab.editorView.dispatch({ selection: { anchor: targetLine.from }, scrollIntoView: true });
-          tab.editorView.focus();
-        }
+        jumpToTabLine(tabId, line);
         closeGlobalSearch();
       });
     });
@@ -2611,6 +3097,26 @@ function runGlobalSearch() {
     statusDiv.textContent = 'Search error: ' + err.message;
     resultsDiv.innerHTML = '';
   });
+}
+
+function openInvestigationWorkspaceFromGlobalSearch() {
+  const section = buildGlobalSearchSection(latestGlobalSearchResults);
+  if (!section.items.length) {
+    alert('No global search results to materialize.');
+    return;
+  }
+  const doc = buildWorkspaceDocument('Investigation Workspace — Search', [section]);
+  createScratchTab('Investigation-Search', doc, 'markdown');
+}
+
+function openInvestigationWorkspaceFromProblems() {
+  const section = buildProblemsSection(latestProblemsSnapshot);
+  if (!section.items.length) {
+    alert('No problems to materialize.');
+    return;
+  }
+  const doc = buildWorkspaceDocument('Investigation Workspace — Problems', [section]);
+  createScratchTab('Investigation-Problems', doc, 'markdown');
 }
 
 // ─── Regex Builder ───
@@ -2630,8 +3136,8 @@ function openRegexBuilder() {
     overlay.innerHTML = `
       <div class="global-search-panel regex-builder-panel">
         <div class="global-search-header">
-          <h3>🔧 Regex Builder</h3>
-          <button class="dialog-btn secondary" id="regex-builder-close">✕</button>
+          <h3>\u2731 Regex Builder</h3>
+          <button class="dialog-btn secondary" id="regex-builder-close">×</button>
         </div>
         <div class="regex-builder-input-row">
           <span class="regex-slash">/</span>
@@ -2802,8 +3308,7 @@ async function exportSession() {
     });
     if (!selected) return;
     const filePath = typeof selected === 'string' ? selected : selected.path;
-    await invoke('approve_path', { path: filePath }).catch(err => console.warn('approve_path err:', err));
-    await invoke('save_file', { path: filePath, content: JSON.stringify(sessionData, null, 2) });
+    await safeSaveToPath(filePath, JSON.stringify(sessionData, null, 2));
     alert('Session exported successfully!');
   } catch (err) {
     console.error('Export session error:', err);
@@ -2900,8 +3405,8 @@ function openCheatsheet() {
     overlay.innerHTML = `
       <div class="global-search-panel cheatsheet-panel">
         <div class="global-search-header">
-          <h3>⌨️ Keyboard Shortcuts</h3>
-          <button class="dialog-btn secondary" id="cheatsheet-close">✕</button>
+          <h3>❌ Keyboard Shortcuts</h3>
+          <button class="dialog-btn secondary" id="cheatsheet-close">×</button>
         </div>
         <div class="cheatsheet-grid">${rows}</div>
       </div>
@@ -2940,21 +3445,6 @@ commandPalette.register('tab:close_all', 'Tab: Close All Tabs', () => closeAllTa
 
 // ─── Fuzzy File Finder (Ctrl+P) ───
 let fileFinderOpen = false;
-
-function fuzzyMatch(query, target) {
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-  let qi = 0, score = 0, prevMatch = -1;
-  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
-    if (t[ti] === q[qi]) {
-      score += (ti === prevMatch + 1) ? 10 : 1; // consecutive chars score higher
-      if (ti === 0 || target[ti - 1] === '/' || target[ti - 1] === '\\' || target[ti - 1] === '.') score += 5; // word boundary
-      prevMatch = ti;
-      qi++;
-    }
-  }
-  return qi === q.length ? score : 0;
-}
 
 function collectAllFiles(entries, base = '') {
   const files = [];
@@ -3026,24 +3516,25 @@ function renderFileFinderResults(query, selIdx = 0) {
   // Gather all sources: open tabs + folder tree files
   const candidates = [];
   for (const tab of state.tabs) {
-    candidates.push({ name: tab.name, displayPath: tab.path || tab.name, type: 'tab', tabId: tab.id });
+    candidates.push({ id: `tab:${tab.id}`, name: tab.name, displayPath: tab.path || tab.name, type: 'tab', tabId: tab.id });
   }
   if (state.folderEntries) {
     for (const f of collectAllFiles(state.folderEntries)) {
       if (!candidates.find(c => c.displayPath === f.path)) {
-        candidates.push({ name: f.name, displayPath: f.displayPath, type: 'file', path: f.path });
+        candidates.push({ id: `file:${f.path}`, name: f.name, displayPath: f.displayPath, type: 'file', path: f.path });
       }
     }
   }
 
-  let results = candidates;
-  if (query.trim()) {
-    results = candidates
-      .map(c => ({ ...c, score: fuzzyMatch(query, c.name) + fuzzyMatch(query, c.displayPath) * 0.5 }))
-      .filter(c => c.score > 0)
-      .sort((a, b) => b.score - a.score);
-  }
-  results = results.slice(0, 20);
+  const index = buildFuzzyIndex(candidates, {
+    textFields: ['name', 'displayPath', 'type'],
+    recencyMap: finderRecencyMap,
+  });
+  const results = queryFuzzyIndex(index, query || '', {
+    limit: 40,
+    pathField: 'displayPath',
+    recencyWeight: 0.0000015,
+  }).map(r => ({ ...r.item, _score: r.score }));
 
   if (results.length === 0) {
     container.innerHTML = '<div class="file-finder-empty">No files found</div>';
@@ -3064,8 +3555,12 @@ function renderFileFinderResults(query, selIdx = 0) {
     item.addEventListener('click', async () => {
       closeFileFinder();
       if (r.type === 'tab') {
+        recordFuzzyUsage('crabtree-finder-recency', `tab:${r.tabId}`);
+        finderRecencyMap.set(`tab:${r.tabId}`, Date.now());
         switchToTab(r.tabId);
       } else if (r.path) {
+        recordFuzzyUsage('crabtree-finder-recency', `file:${r.path}`);
+        finderRecencyMap.set(`file:${r.path}`, Date.now());
         const existing = state.tabs.find(t => t.path === r.path);
         if (existing) { switchToTab(existing.id); return; }
         try { createTab(await invoke('read_file', { path: r.path })); }
@@ -3177,6 +3672,176 @@ function hideMinimap() {
   if (minimap) minimap.classList.add('hidden');
 }
 
+// ─── Realtime Panel Refresh ───
+let _realtimePanelTimer = null;
+function scheduleRealtimePanelsRefresh() {
+  clearTimeout(_realtimePanelTimer);
+  _realtimePanelTimer = setTimeout(() => {
+    const active = state.tabs.find((t) => t.id === state.activeTabId);
+    if (outlinePanelOpen && active) renderOutlinePanel(active);
+    if (problemsPanelOpen) refreshProblemsPanelIncremental();
+  }, 250);
+}
+
+// ─── Outline Panel ───
+function toggleOutlinePanel() {
+  outlinePanelOpen ? closeOutlinePanel() : openOutlinePanel();
+}
+
+function openOutlinePanel() {
+  outlinePanelOpen = true;
+  let panel = document.getElementById('outline-panel');
+  if (!panel) {
+    panel = document.createElement('aside');
+    panel.id = 'outline-panel';
+    panel.className = 'outline-panel';
+    document.getElementById('main-layout')?.appendChild(panel);
+  }
+  panel.classList.remove('hidden');
+  const active = state.tabs.find((t) => t.id === state.activeTabId);
+  if (active) renderOutlinePanel(active);
+}
+
+function closeOutlinePanel() {
+  outlinePanelOpen = false;
+  const panel = document.getElementById('outline-panel');
+  if (panel) panel.classList.add('hidden');
+}
+
+function renderOutlinePanel(tab) {
+  const panel = document.getElementById('outline-panel');
+  if (!panel || !tab) return;
+  const content = tab.editorView ? tab.editorView.state.doc.toString() : (tab.content || '');
+  const items = buildOutline(content, tab.language || 'plaintext', 500);
+  panel.innerHTML = `
+    <div class="outline-header">
+      <span class="outline-title">OUTLINE</span>
+      <button class="outline-close" id="outline-close-btn">\u00D7</button>
+    </div>
+    <div class="outline-subtitle">${escapeHtml(tab.name)} \u00B7 ${items.length} items</div>
+    <div class="outline-items">
+      ${items.map((item, idx) => `
+        <div class="outline-item kind-${item.kind}" data-line="${item.line}" data-idx="${idx}" style="padding-left:${10 + item.depth * 12}px">
+          <span class="outline-label">${escapeHtml(item.label)}</span>
+          <span class="outline-line">L${item.line}</span>
+        </div>
+      `).join('')}
+      ${items.length === 0 ? '<div class="outline-empty">No symbols</div>' : ''}
+    </div>
+  `;
+
+  panel.querySelector('#outline-close-btn')?.addEventListener('click', closeOutlinePanel);
+  panel.querySelectorAll('.outline-item').forEach((el) => {
+    el.addEventListener('click', () => {
+      const line = Number(el.dataset.line || 1);
+      jumpToTabLine(tab.id, line);
+    });
+  });
+}
+
+// ─── Task Panel ───
+function toggleTaskPanel() {
+  taskPanelOpen ? closeTaskPanel() : openTaskPanel();
+}
+
+function closeTaskPanel() {
+  taskPanelOpen = false;
+  const panel = document.getElementById('task-panel');
+  if (panel) panel.classList.add('hidden');
+}
+
+async function openTaskPanel() {
+  if (!(await requireTrustedForAction('Task execution'))) return;
+  taskPanelOpen = true;
+  let panel = document.getElementById('task-panel');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'task-panel';
+    panel.className = 'bottom-panel task-panel';
+    document.getElementById('main-layout')?.appendChild(panel);
+  }
+  panel.classList.remove('hidden');
+  renderTaskPanel();
+}
+
+function renderTaskPanel(status = '') {
+  const panel = document.getElementById('task-panel');
+  if (!panel) return;
+  const tasks = taskRunner.getTemplates();
+  const options = tasks.map((t) => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.label)}</option>`).join('');
+  const historyRows = taskRunner.history.slice(0, 10).map((h) => {
+    const ok = h.ok ? 'ok' : 'fail';
+    const cmd = [h.task.command, ...(h.task.args || [])].join(' ');
+    return `
+      <div class="task-history-row ${ok}">
+        <div class="task-history-meta">${escapeHtml(h.timestamp)} \u00B7 ${escapeHtml(cmd)} \u00B7 exit ${h.exit_code}</div>
+        <pre class="task-history-output">${escapeHtml((h.stdout || h.stderr || '').slice(0, 1200))}</pre>
+      </div>
+    `;
+  }).join('');
+
+  panel.innerHTML = `
+    <div class="task-header">
+      <span class="task-title">TASKS</span>
+      <span class="task-status">${escapeHtml(status)}</span>
+      <button id="task-close-btn" class="problems-close">\u00D7</button>
+    </div>
+    <div class="task-controls">
+      <select id="task-select">${options}</select>
+      <button id="task-run-btn" class="dialog-btn primary">Run</button>
+      <button id="task-rerun-btn" class="dialog-btn secondary">Rerun Last</button>
+      <button id="task-new-btn" class="dialog-btn secondary">Add Template</button>
+    </div>
+    <div class="task-history">
+      ${historyRows || '<div class="problems-empty">No task runs yet</div>'}
+    </div>
+  `;
+
+  panel.querySelector('#task-close-btn')?.addEventListener('click', closeTaskPanel);
+  panel.querySelector('#task-run-btn')?.addEventListener('click', async () => {
+    const selected = panel.querySelector('#task-select')?.value;
+    const task = taskRunner.getTemplates().find((t) => t.id === selected);
+    if (!task) return;
+    await runTaskFromPanel(task);
+  });
+  panel.querySelector('#task-rerun-btn')?.addEventListener('click', async () => {
+    const last = taskRunner.getLastTaskId();
+    const task = taskRunner.getTemplates().find((t) => t.id === last);
+    if (!task) {
+      renderTaskPanel('No previous task');
+      return;
+    }
+    await runTaskFromPanel(task);
+  });
+  panel.querySelector('#task-new-btn')?.addEventListener('click', () => {
+    const label = prompt('Task label:', 'Custom Task');
+    if (!label) return;
+    const command = prompt('Command (binary):', 'npm');
+    if (!command) return;
+    const argsRaw = prompt('Arguments (space separated):', 'run test');
+    const args = (argsRaw || '').split(' ').map((a) => a.trim()).filter(Boolean);
+    const taskId = `task:custom:${Date.now()}`;
+    taskRunner.upsertTask({ id: taskId, label, command, args, cwd: state.folderPath || null });
+    renderTaskPanel('Template added');
+  });
+}
+
+async function runTaskFromPanel(task) {
+  try {
+    renderTaskPanel(`Running ${task.label}...`);
+    await taskRunner.runTask(task, state.folderPath || null);
+    renderTaskPanel(`${task.label} finished`);
+  } catch (err) {
+    renderTaskPanel(`Task failed: ${err.message}`);
+  }
+}
+
+function severityIcon(severity) {
+  if (severity === 'error') return 'E';
+  if (severity === 'warning') return 'W';
+  return 'I';
+}
+
 // ─── Problems Panel ───
 let problemsPanelOpen = false;
 
@@ -3203,25 +3868,77 @@ function closeProblemsPanel() {
   if (panel) panel.classList.add('hidden');
 }
 
+// Incremental refresh: only recompute diagnostics for the active tab,
+// reuse cached results for other tabs, then do a full DOM update.
+const _tabDiagCache = new Map(); // tabId -> { hash, diagnostics[] }
+function refreshProblemsPanelIncremental() {
+  const panel = document.getElementById('problems-panel');
+  if (!panel) return;
+
+  const activeId = state.activeTabId;
+  const problems = [];
+  for (const tab of state.tabs) {
+    let diagsForTab;
+    if (tab.id === activeId) {
+      // Always recompute for the active (editing) tab
+      diagsForTab = collectTabDiagnostics(tab);
+      _tabDiagCache.set(tab.id, diagsForTab);
+    } else {
+      // Use cached diagnostics for background tabs
+      if (_tabDiagCache.has(tab.id)) {
+        diagsForTab = _tabDiagCache.get(tab.id);
+      } else {
+        diagsForTab = collectTabDiagnostics(tab);
+        _tabDiagCache.set(tab.id, diagsForTab);
+      }
+    }
+    for (const d of diagsForTab) {
+      problems.push({
+        tabId: tab.id,
+        tabName: tab.name,
+        line: d.line,
+        text: d.message,
+        severity: d.severity,
+      });
+    }
+  }
+  // Remove cache entries for closed tabs
+  for (const cachedId of _tabDiagCache.keys()) {
+    if (!state.tabs.some(t => t.id === cachedId)) _tabDiagCache.delete(cachedId);
+  }
+  latestProblemsSnapshot = problems;
+  _renderProblemsPanelDOM(panel, problems);
+}
+
 function refreshProblemsPanel() {
   const panel = document.getElementById('problems-panel');
   if (!panel) return;
 
+  // Full scan invalidates the incremental cache
+  _tabDiagCache.clear();
+
   const problems = [];
   for (const tab of state.tabs) {
-    const content = tab.content || '';
-    const lines = content.split('\n');
-    lines.forEach((line, idx) => {
-      if (SEVERITY_RE.test(line)) {
-        problems.push({ tab, line: idx + 1, text: line.trim().substring(0, 200), severity: 'error' });
-      } else if (WARN_RE.test(line)) {
-        problems.push({ tab, line: idx + 1, text: line.trim().substring(0, 200), severity: 'warn' });
-      }
-    });
+    const diagnostics = collectTabDiagnostics(tab);
+    for (const d of diagnostics) {
+      problems.push({
+        tabId: tab.id,
+        tabName: tab.name,
+        line: d.line,
+        text: d.message,
+        severity: d.severity,
+      });
+    }
   }
+  latestProblemsSnapshot = problems;
 
-  const errors = problems.filter(p => p.severity === 'error');
-  const warnings = problems.filter(p => p.severity === 'warn');
+  _renderProblemsPanelDOM(panel, problems);
+}
+
+function _renderProblemsPanelDOM(panel, problems) {
+  const errors = problems.filter((p) => p.severity === 'error');
+  const warnings = problems.filter((p) => p.severity === 'warning');
+  const infos = problems.filter((p) => p.severity === 'info');
 
   panel.innerHTML = `
     <div class="problems-header">
@@ -3229,14 +3946,21 @@ function refreshProblemsPanel() {
       <span class="problems-counts">
         <span style="color:#f7768e">⊘ ${errors.length} Errors</span>
         <span style="color:#e0af68">⚠ ${warnings.length} Warnings</span>
+        <span style="color:#7aa2f7">• ${infos.length} Info</span>
       </span>
-      <button class="problems-close" id="problems-close-btn">✕</button>
+      <select id="diag-filter" class="diag-filter">
+        <option value="all" ${state.diagnosticsSeverityFilter === 'all' ? 'selected' : ''}>All</option>
+        <option value="warning" ${state.diagnosticsSeverityFilter === 'warning' ? 'selected' : ''}>Warning+</option>
+        <option value="error" ${state.diagnosticsSeverityFilter === 'error' ? 'selected' : ''}>Errors only</option>
+      </select>
+      <button class="dialog-btn secondary" id="problems-workspace-btn">Workspace</button>
+      <button class="problems-close" id="problems-close-btn">×</button>
     </div>
     <div class="problems-list">
-      ${problems.slice(0, 200).map(p => `
-        <div class="problem-item problem-${p.severity}" data-tab-id="${p.tab.id}" data-line="${p.line}">
-          <span class="problem-icon">${p.severity === 'error' ? '⊘' : '⚠'}</span>
-          <span class="problem-file">${escapeHtml(p.tab.name)}:${p.line}</span>
+      ${problems.slice(0, 200).map((p) => `
+        <div class="problem-item problem-${p.severity}" data-tab-id="${p.tabId}" data-line="${p.line}">
+          <span class="problem-icon">${severityIcon(p.severity)}</span>
+          <span class="problem-file">${escapeHtml(p.tabName)}:${p.line}</span>
           <span class="problem-text">${escapeHtml(p.text)}</span>
         </div>
       `).join('')}
@@ -3245,27 +3969,18 @@ function refreshProblemsPanel() {
     </div>
   `;
 
-  // Close button event listener (not inline onclick, since module scope)
   panel.querySelector('#problems-close-btn')?.addEventListener('click', closeProblemsPanel);
+  panel.querySelector('#diag-filter')?.addEventListener('change', (e) => setDiagnosticsSeverityFilter(e.target.value));
+  panel.querySelector('#problems-workspace-btn')?.addEventListener('click', () => openInvestigationWorkspaceFromProblems());
 
-  // Click to jump
-  panel.querySelectorAll('.problem-item').forEach(item => {
+  panel.querySelectorAll('.problem-item').forEach((item) => {
     item.addEventListener('click', () => {
       const tabId = parseInt(item.dataset.tabId);
       const line = parseInt(item.dataset.line);
-      switchToTab(tabId);
-      setTimeout(() => {
-        const tab = state.tabs.find(t => t.id === tabId);
-        if (tab?.editorView) {
-          const l = tab.editorView.state.doc.line(Math.min(line, tab.editorView.state.doc.lines));
-          tab.editorView.dispatch({ selection: { anchor: l.from }, scrollIntoView: true });
-          tab.editorView.focus();
-        }
-      }, 50);
+      jumpToTabLine(tabId, line);
     });
   });
 }
-
 // ─── Which-Key Progressive Hints ───
 let whichKeyTimer = null;
 let whichKeyVisible = false;
@@ -3298,15 +4013,15 @@ function showWhichKey() {
       <div class="wk-item"><kbd>O</kbd> Open File</div>
       <div class="wk-item"><kbd>S</kbd> Save</div>
       <div class="wk-item"><kbd>P</kbd> File Finder</div>
-      <div class="wk-item"><kbd>⇧P</kbd> Command Palette</div>
+      <div class="wk-item"><kbd>\u21E7P</kbd> Command Palette</div>
       <div class="wk-item"><kbd>B</kbd> Toggle Sidebar</div>
       <div class="wk-item"><kbd>G</kbd> Go to Line</div>
       <div class="wk-item"><kbd>F</kbd> Find in File</div>
-      <div class="wk-item"><kbd>⇧F</kbd> Global Search</div>
+      <div class="wk-item"><kbd>\u21E7F</kbd> Global Search</div>
       <div class="wk-item"><kbd>Tab</kbd> Next Tab</div>
       <div class="wk-item"><kbd>/</kbd> Shortcuts</div>
       <div class="wk-item"><kbd>M</kbd> Minimap</div>
-      <div class="wk-item"><kbd>⇧E</kbd> Problems</div>
+      <div class="wk-item"><kbd>\u21E7E</kbd> Problems</div>
       <div class="wk-item"><kbd>+/-</kbd> Font Size</div>
     </div>
   `;
@@ -3323,6 +4038,8 @@ function hideWhichKey() {
 commandPalette.register('file:finder', 'File: Quick Open', () => toggleFileFinder(), 'Ctrl+P');
 commandPalette.register('view:minimap', 'View: Toggle Minimap', () => toggleMinimap(), 'Ctrl+M');
 commandPalette.register('view:problems', 'View: Toggle Problems Panel', () => toggleProblemsPanel(), 'Ctrl+Shift+E');
+commandPalette.register('view:outline', 'View: Toggle Outline Panel', () => toggleOutlinePanel(), 'Ctrl+Shift+B');
+commandPalette.register('view:tasks', 'View: Toggle Task Panel', () => toggleTaskPanel(), 'Ctrl+Shift+T');
 
 // ─── Initialize ───
 async function init() {
@@ -3364,7 +4081,7 @@ async function init() {
   updateSavedLogFiltersUI();
 
   // Auto-save UI
-  document.getElementById('status-autosave').textContent = state.autoSave ? '💾 Auto' : '💾 Manual';
+  document.getElementById('status-autosave').textContent = state.autoSave ? '◉ Auto' : '○ Manual';
 
   // Drag & drop
   setupDragDrop();
@@ -3381,6 +4098,8 @@ async function init() {
   if (!restored) {
     document.getElementById('welcome-screen').classList.remove('hidden');
   }
+  updateTrustBadge();
+  await loadWorkspaceExtensions();
 
   // Session cleanup: clear approved paths on app quit
   window.addEventListener('beforeunload', async () => {
@@ -3391,7 +4110,7 @@ async function init() {
     }
   });
 
-  console.log('🦀 Crab Tree initialized');
+  console.log('Crab Tree initialized');
 }
 
 // ─── Security: Secret Detection ───
@@ -3419,7 +4138,7 @@ function scanSecrets(content, maxLines = 10000) {
           name: pattern.name,
           severity: pattern.severity,
           line: i + 1,
-          match: m[0].length > 40 ? m[0].substring(0, 40) + '…' : m[0],
+          match: m[0].length > 40 ? m[0].substring(0, 40) + '\u2026' : m[0],
         });
       }
     }
@@ -3468,7 +4187,7 @@ function renderSecurityBanner(tab, container) {
   const highs = findings.filter(f => f.severity === 'high').length;
   const warnings = findings.filter(f => f.severity === 'warning').length;
 
-  const severityIcon = criticals > 0 ? '🚨' : highs > 0 ? '⚠️' : '🔍';
+  const severityIcon = criticals > 0 ? '✘' : highs > 0 ? '⚠' : '\u2315';
   const severityClass = criticals > 0 ? 'critical' : highs > 0 ? 'high' : 'warning';
 
   let summary = `${severityIcon} <strong>${findings.length} potential secret${findings.length > 1 ? 's' : ''} detected</strong>`;
@@ -3488,7 +4207,7 @@ function renderSecurityBanner(tab, container) {
   const details = Object.entries(grouped).map(([name, items]) =>
     `<span class="secret-finding-group"><span class="secret-label">${escapeHtml(name)}</span> ` +
     `on line${items.length > 1 ? 's' : ''} ${items.map(i => `<span class="secret-line" data-line="${i.line}">${i.line}</span>`).join(', ')}</span>`
-  ).join(' · ');
+  ).join(' \u00B7 ');
 
   banner.innerHTML = `<div class="security-banner-content ${severityClass}">${summary}<div class="secret-details">${details}</div></div>`;
 
@@ -3533,3 +4252,4 @@ function isPathTraversalSafe(filePath) {
 }
 
 init();
+

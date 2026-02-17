@@ -147,3 +147,116 @@ test('FNV-1a hash includes length to avoid trivial collisions', () => {
   // Length prefix should be different
   assert.notEqual(a.split(':')[0], b.split(':')[0]);
 });
+
+// ─── resolveRelativePath rejects traversal sequences ───
+// Replicate the fixed resolveRelativePath from main.js
+
+function resolveRelativePath(baseDir, maybeRelativePath) {
+  const p = String(maybeRelativePath || '');
+  if (!p) return '';
+  if (/^[A-Za-z]:\\/.test(p) || p.startsWith('/') || p.startsWith('\\\\')) return p;
+  const sep = baseDir?.includes('/') ? '/' : '\\';
+  const candidate = `${baseDir}${sep}${p}`.replace(/[\\/]+/g, sep);
+  if (candidate.includes('..')) {
+    return '';
+  }
+  return candidate;
+}
+
+test('resolveRelativePath rejects ../ traversal in relative path', () => {
+  assert.equal(resolveRelativePath('/workspace', '../../../etc/passwd'), '');
+  assert.equal(resolveRelativePath('C:\\project', '..\\..\\Windows\\System32'), '');
+  assert.equal(resolveRelativePath('', '../etc/passwd'), '');
+});
+
+test('resolveRelativePath allows safe relative paths', () => {
+  const result = resolveRelativePath('/workspace', 'src/main.js');
+  assert.ok(result.includes('src'));
+  assert.ok(result.includes('main.js'));
+});
+
+test('resolveRelativePath passes through absolute paths unchanged', () => {
+  assert.equal(resolveRelativePath('/workspace', '/etc/hosts'), '/etc/hosts');
+  assert.equal(resolveRelativePath('C:\\project', 'D:\\other\\file.txt'), 'D:\\other\\file.txt');
+});
+
+// ─── isPathTraversalSafe blocks dangerous paths ───
+// Replicate from main.js
+
+function isPathTraversalSafe(filePath) {
+  if (!filePath || typeof filePath !== 'string') return { safe: false, reason: 'Empty path' };
+  const dangerous = [
+    { pattern: /\.\.[/\\]/g, reason: 'Directory traversal (../)' },
+    { pattern: /[/\\]\.\.[/\\]/g, reason: 'Mid-path traversal' },
+    { pattern: /%2e%2e/gi, reason: 'URL-encoded traversal (%2e%2e)' },
+    { pattern: /%2f/gi, reason: 'URL-encoded slash (%2f)' },
+    { pattern: /\0/g, reason: 'Null byte injection' },
+  ];
+  for (const d of dangerous) {
+    if (d.pattern.test(filePath)) {
+      return { safe: false, reason: d.reason };
+    }
+  }
+  return { safe: true };
+}
+
+test('isPathTraversalSafe blocks directory traversal attacks', () => {
+  assert.equal(isPathTraversalSafe('../../../etc/passwd').safe, false);
+  assert.equal(isPathTraversalSafe('..\\..\\Windows\\System32').safe, false);
+  assert.equal(isPathTraversalSafe('%2e%2e%2fetc%2fpasswd').safe, false);
+  assert.equal(isPathTraversalSafe('file\0.txt').safe, false);
+  assert.equal(isPathTraversalSafe(null).safe, false);
+  assert.equal(isPathTraversalSafe('').safe, false);
+});
+
+test('isPathTraversalSafe allows normal paths', () => {
+  assert.equal(isPathTraversalSafe('/home/user/project/src/main.js').safe, true);
+  assert.equal(isPathTraversalSafe('C:\\Users\\gokul\\project\\file.txt').safe, true);
+  assert.equal(isPathTraversalSafe('src/utils/helpers.js').safe, true);
+});
+
+// ─── Extension open_file defense: both checks must pass ───
+
+test('extension open_file path must survive both resolveRelativePath and isPathTraversalSafe', () => {
+  // Simulate the fixed flow: resolve → validate → proceed
+  const attacks = [
+    '../../../etc/passwd',
+    '..\\..\\Windows\\System32\\config\\SAM',
+    '%2e%2e%2f%2e%2e%2fetc%2fpasswd',
+  ];
+  for (const malicious of attacks) {
+    const resolved = resolveRelativePath('/workspace', malicious);
+    // Either resolveRelativePath rejects it (returns '')
+    // or isPathTraversalSafe catches it
+    if (resolved) {
+      assert.equal(isPathTraversalSafe(resolved).safe, false,
+        `Attack path "${malicious}" resolved to "${resolved}" but wasn't blocked`);
+    }
+    // If resolved is '', the open_file handler returns early — also safe
+  }
+});
+
+// ─── Extension open_file blocks absolute paths ───
+
+test('extension open_file rejects absolute paths from extensions', () => {
+  // The fixed handler blocks absolute paths before they reach resolveRelativePath.
+  // Simulate the absolute-path check from executeExtensionCommand:
+  const absolutePaths = [
+    'C:\\Windows\\System32\\config\\SAM',
+    'D:\\secrets\\passwords.txt',
+    '/etc/passwd',
+    '/root/.ssh/id_rsa',
+    '\\\\server\\share\\file.txt',
+  ];
+  for (const p of absolutePaths) {
+    const isAbsolute = /^[A-Za-z]:[\\\/]/.test(p) || p.startsWith('/') || p.startsWith('\\\\');
+    assert.equal(isAbsolute, true, `Absolute path "${p}" should be detected`);
+  }
+
+  // Relative paths should NOT be blocked by absolute-path check
+  const relativePaths = ['src/main.js', 'docs/README.md', 'lib\\utils.js'];
+  for (const p of relativePaths) {
+    const isAbsolute = /^[A-Za-z]:[\\\/]/.test(p) || p.startsWith('/') || p.startsWith('\\\\');
+    assert.equal(isAbsolute, false, `Relative path "${p}" should pass`);
+  }
+});
