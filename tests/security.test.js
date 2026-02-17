@@ -260,3 +260,17 @@ test('extension open_file rejects absolute paths from extensions', () => {
     assert.equal(isAbsolute, false, `Relative path "${p}" should pass`);
   }
 });
+
+function isWithinWorkspaceBoundary(target, folderPath) {
+  const normTarget = String(target || '').replace(/\\/g, '/').toLowerCase();
+  const normFolder = String(folderPath || '').replace(/\\/g, '/').toLowerCase();
+  return normTarget === normFolder || normTarget.startsWith(`${normFolder}/`);
+}
+
+test('workspace boundary check requires directory separator-safe prefix', () => {
+  assert.equal(isWithinWorkspaceBoundary('/workspace/file.txt', '/workspace'), true);
+  assert.equal(isWithinWorkspaceBoundary('/workspace/sub/notes.md', '/workspace'), true);
+  assert.equal(isWithinWorkspaceBoundary('/workspace-evil/file.txt', '/workspace'), false);
+  assert.equal(isWithinWorkspaceBoundary('C:\\repo\\file.txt', 'C:\\repo'), true);
+  assert.equal(isWithinWorkspaceBoundary('C:\\repo-evil\\file.txt', 'C:\\repo'), false);
+});

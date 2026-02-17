@@ -16,20 +16,46 @@ static APPROVED_PATHS: Lazy<Mutex<Vec<PathBuf>>> = Lazy::new(|| {
     Mutex::new(Vec::new())
 });
 
+fn add_approved_path(canonical: PathBuf) -> Result<(), String> {
+    let mut allowed = APPROVED_PATHS.lock()
+        .map_err(|_| "Allowlist lock poisoned".to_string())?;
+
+    if !allowed.contains(&canonical) {
+        allowed.push(canonical);
+    }
+    Ok(())
+}
+
 /// Add a path to the allowlist (called after user opens file/folder via dialog).
 /// Deduplicates to prevent unbounded growth from repeated saves.
 #[tauri::command]
 fn approve_path(path: String) -> Result<(), String> {
     let canonical = fs::canonicalize(&path)
         .map_err(|e| format!("Cannot resolve path: {}", e))?;
-    
-    let mut allowed = APPROVED_PATHS.lock()
-        .map_err(|_| "Allowlist lock poisoned".to_string())?;
-    
-    if !allowed.contains(&canonical) {
-        allowed.push(canonical);
+
+    add_approved_path(canonical)
+}
+
+/// Add a path to the allowlist only if it canonicalizes within a canonical workspace root.
+/// This blocks symlink-based escapes for extension-driven open_file requests.
+#[tauri::command]
+fn approve_path_within(path: String, root: String) -> Result<(), String> {
+    let canonical = fs::canonicalize(&path)
+        .map_err(|e| format!("Cannot resolve path: {}", e))?;
+    let canonical_root = fs::canonicalize(&root)
+        .map_err(|e| format!("Cannot resolve root path: {}", e))?;
+
+    let root_meta = fs::metadata(&canonical_root)
+        .map_err(|e| format!("Cannot access root metadata: {}", e))?;
+    if !root_meta.is_dir() {
+        return Err("Root path is not a directory".to_string());
     }
-    Ok(())
+
+    if !canonical.starts_with(&canonical_root) {
+        return Err("Path is outside workspace root".to_string());
+    }
+
+    add_approved_path(canonical)
 }
 
 /// Check if a path is under an approved parent or is approved itself
@@ -393,6 +419,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             approve_path,
+            approve_path_within,
             clear_approved_paths,
             read_file,
             save_file,

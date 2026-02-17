@@ -2729,7 +2729,11 @@ async function executeExtensionCommand(command) {
       alert(`Extension open_file blocked: absolute paths are not allowed. Use a workspace-relative path.`);
       return;
     }
-    const target = resolveRelativePath(state.folderPath || '', rawPath);
+    if (!state.folderPath) {
+      alert('Extension open_file blocked: open a workspace folder first.');
+      return;
+    }
+    const target = resolveRelativePath(state.folderPath, rawPath);
     if (!target) return;
     const pathCheck = isPathTraversalSafe(target);
     if (!pathCheck.safe) {
@@ -2737,16 +2741,14 @@ async function executeExtensionCommand(command) {
       return;
     }
     // Verify resolved path stays within workspace boundary
-    if (state.folderPath) {
-      const normTarget = target.replace(/\\/g, '/').toLowerCase();
-      const normFolder = state.folderPath.replace(/\\/g, '/').toLowerCase();
-      if (!normTarget.startsWith(normFolder)) {
-        alert(`Extension open_file blocked: path escapes workspace boundary.`);
-        return;
-      }
+    const normTarget = target.replace(/\\/g, '/').toLowerCase();
+    const normFolder = state.folderPath.replace(/\\/g, '/').toLowerCase();
+    if (!(normTarget === normFolder || normTarget.startsWith(`${normFolder}/`))) {
+      alert(`Extension open_file blocked: path escapes workspace boundary.`);
+      return;
     }
     try {
-      await invoke('approve_path', { path: target });
+      await invoke('approve_path_within', { path: target, root: state.folderPath });
       const data = await invoke('read_file', { path: target });
       createTab(data);
     } catch (err) {

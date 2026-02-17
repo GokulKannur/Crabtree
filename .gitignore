@@ -22,3 +22,18 @@ yarn-error.log
 
 # Test artifacts
 /crabtree_test_area
+
+# Local worktrees / imported source snapshots
+/zed-main
+
+# Local helper tools and release scratch files
+/.tools
+/release-notes-*.md
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
