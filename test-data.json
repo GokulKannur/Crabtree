@@ -1,0 +1,92 @@
+{
+    "project": "CrabTree",
+    "version": "3.2.0",
+    "isActive": true,
+    "releaseDate": null,
+    "contributors": 5,
+    "rating": 4.8,
+    "features": [
+        "Multi-tab editor",
+        "JSON tree viewer",
+        "CSV table viewer",
+        "Log filtering",
+        "Command palette",
+        "File explorer"
+    ],
+    "config": {
+        "theme": "dark",
+        "fontSize": 14,
+        "wordWrap": false,
+        "autoSave": true,
+        "plugins": {
+            "linter": {
+                "enabled": true,
+                "severity": "warning"
+            },
+            "formatter": {
+                "enabled": false,
+                "indentSize": 2
+            }
+        }
+    },
+    "stats": {
+        "downloads": 15000,
+        "stars": 342,
+        "issues": {
+            "open": 12,
+            "closed": 87
+        }
+    },
+    "largeArray": [
+        {
+            "id": 1,
+            "name": "Alpha",
+            "value": 100
+        },
+        {
+            "id": 2,
+            "name": "Beta",
+            "value": 200
+        },
+        {
+            "id": 3,
+            "name": "Gamma",
+            "value": 300
+        },
+        {
+            "id": 4,
+            "name": "Delta",
+            "value": 400
+        },
+        {
+            "id": 5,
+            "name": "Epsilon",
+            "value": 500
+        },
+        {
+            "id": 6,
+            "name": "Zeta",
+            "value": 600
+        },
+        {
+            "id": 7,
+            "name": "Eta",
+            "value": 700
+        },
+        {
+            "id": 8,
+            "name": "Theta",
+            "value": 800
+        },
+        {
+            "id": 9,
+            "name": "Iota",
+            "value": 900
+        },
+        {
+            "id": 10,
+            "name": "Kappa",
+            "value": 1000
+        }
+    ]
+}
