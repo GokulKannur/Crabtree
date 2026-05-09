@@ -1,0 +1,36 @@
+# Dependencies
+/node_modules
+
+# Build output
+/dist
+/target
+/src-tauri/target
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+/.vscode
+/.idea
+*.swp
+*.swo
+
+# Debug logs
+npm-debug.log
+yarn-error.log
+
+# Test artifacts
+/crabtree_test_area
+
+# Local helper tools and release scratch files
+/.tools
+/release-notes-*.md
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx

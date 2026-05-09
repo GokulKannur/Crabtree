@@ -1,0 +1,2 @@
+pub const JSON_INDEX_MEMORY_CAP_BYTES: usize = 96 * 1024 * 1024;
+pub const JSON_INDEX_DISK_VERSION: u32 = 1;

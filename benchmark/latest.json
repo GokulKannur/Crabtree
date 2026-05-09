@@ -1,0 +1,56 @@
+{
+  "generatedAt": "2026-05-09T15:03:14.334Z",
+  "environment": {
+    "node": "v24.13.1",
+    "platform": "linux",
+    "arch": "x64"
+  },
+  "results": [
+    {
+      "dataset": "10MB",
+      "json_size": "10.0 MB",
+      "log_size": "10.0 MB",
+      "json_parse_ms": 76.84,
+      "json_path_ms": 0.1,
+      "json_locate_ms": 255.85,
+      "json_structural_lookup_est_ms": 5,
+      "cached_structural_lookup_1k_est_ms": 0.08,
+      "structural_index_estimated_mb": 1.8,
+      "log_filter_ms": 41.83,
+      "repeated_log_filter_5x_ms": 168.35,
+      "repeated_regex_filter_3x_ms": 104.03,
+      "query_preview_cap_mb": 1,
+      "resolved": true,
+      "located": true,
+      "structural_hit": true,
+      "log_matches": 116781,
+      "session_preview_bytes": 1000000,
+      "avoided_initial_ipc_bytes": 9485847,
+      "csv_row_offset_index_estimated_mb": 1.3,
+      "rss_mb": 352.4
+    },
+    {
+      "dataset": "25MB",
+      "json_size": "25.0 MB",
+      "log_size": "25.0 MB",
+      "json_parse_ms": 172.24,
+      "json_path_ms": 0.03,
+      "json_locate_ms": 490.25,
+      "json_structural_lookup_est_ms": 11.72,
+      "cached_structural_lookup_1k_est_ms": 0.02,
+      "structural_index_estimated_mb": 4.5,
+      "log_filter_ms": 96.24,
+      "repeated_log_filter_5x_ms": 449.15,
+      "repeated_regex_filter_3x_ms": 281.43,
+      "query_preview_cap_mb": 1,
+      "resolved": true,
+      "located": true,
+      "structural_hit": true,
+      "log_matches": 290114,
+      "session_preview_bytes": 1000000,
+      "avoided_initial_ipc_bytes": 25214448,
+      "csv_row_offset_index_estimated_mb": 3.2,
+      "rss_mb": 775
+    }
+  ]
+}
