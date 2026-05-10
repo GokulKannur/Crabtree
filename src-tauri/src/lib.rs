@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,11 +10,25 @@ use std::time::{Instant, UNIX_EPOCH};
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 use once_cell::sync::Lazy;
-use regex::{Regex, RegexBuilder};
 
 mod engine;
-use engine::cache::{JSON_INDEX_DISK_VERSION, JSON_INDEX_MEMORY_CAP_BYTES};
+use engine::cache::JSON_INDEX_MEMORY_CAP_BYTES;
 use engine::sessions::{MAX_SESSION_PREVIEW_BYTES, MAX_RANGE_READ_BYTES, MAX_LINE_READ_BYTES, MAX_SESSION_COUNT, DEFAULT_INACTIVITY_TTL_SECS};
+use engine::json::{
+    JsonIndexNode, JsonIndexCache, JsonIndexResult, JsonChildrenResult, JsonPathLookupResult,
+    JsonScanner, build_json_index_cache, normalize_json_path, json_cache_key,
+    estimate_json_index_bytes, load_json_index_from_disk, persist_json_index_to_disk,
+};
+use engine::logs::{
+    LogClauseInfo, LogFilterResult, LogLineWindow,
+    CompiledLogQuery, compile_log_query_native, matches_compiled_log_query, log_clause_info,
+    LogQueryResultCache, log_query_cache_key,
+};
+use engine::csv::{
+    CsvIndexCache, CsvIndexResult, CsvRowsResult, CsvFilterResult, CsvSortResult,
+    detect_csv_delimiter, parse_csv_record, build_csv_index,
+    get_csv_rows_paged, filter_csv_rows_impl, sort_csv_rows_impl,
+};
 
 // ─── Cancellation Token Registry ───
 /// Maps operation keys to cancel flags for cooperative cancellation.
@@ -239,99 +251,12 @@ pub struct FileRange {
     pub eof: bool,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct LogLineWindow {
-    pub lines: Vec<String>,
-    pub start_line: usize,
-    pub line_count: usize,
-}
 
-#[derive(Serialize, Deserialize)]
-pub struct LogFilterResult {
-    pub error: String,
-    pub filtered_lines: Vec<String>,
-    pub result_count: usize,
-    pub total_count: usize,
-    pub clause_count: usize,
-    pub term_count: usize,
-    pub clauses: Vec<Vec<LogClauseInfo>>,
-    pub truncated: bool,
-}
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct LogClauseInfo {
-    pub token: String,
-    pub negate: bool,
-}
 
-#[derive(Clone)]
-enum LogPredicate {
-    Contains(String),
-    FieldContains { field: String, value: String },
-    Regex(Regex),
-    Severity(String),
-}
 
-#[derive(Clone)]
-struct LogCondition {
-    token: String,
-    negate: bool,
-    predicate: LogPredicate,
-}
 
-struct CompiledLogQuery {
-    clauses: Vec<Vec<LogCondition>>,
-    term_count: usize,
-}
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct JsonIndexNode {
-    pub id: usize,
-    pub parent_id: Option<usize>,
-    pub path: String,
-    pub kind: String,
-    pub depth: usize,
-    pub from: u64,
-    pub to: u64,
-    pub child_count: usize,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct JsonIndexCache {
-    nodes: Vec<JsonIndexNode>,
-    truncated: bool,
-    error: String,
-    max_nodes: usize,
-    max_depth: usize,
-    max_bytes: u64,
-    estimated_bytes: usize,
-    last_access: u64,
-    cache_key: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct PersistedJsonIndexCache {
-    version: u32,
-    cache_key: String,
-    cache: JsonIndexCache,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct JsonIndexResult {
-    pub nodes: Vec<JsonIndexNode>,
-    pub truncated: bool,
-    pub error: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct JsonChildrenResult {
-    pub parent_id: usize,
-    pub offset: usize,
-    pub total: usize,
-    pub nodes: Vec<JsonIndexNode>,
-    pub truncated: bool,
-    pub error: String,
-}
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionCacheStats {
@@ -368,6 +293,7 @@ pub struct SessionDiagnosticEntry {
     pub has_csv_index: bool,
     pub csv_row_count: usize,
     pub csv_estimated_bytes: usize,
+    pub total_estimated_bytes: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -377,60 +303,11 @@ pub struct SessionDiagnosticsResult {
     pub total_json_bytes: usize,
     pub total_csv_bytes: usize,
     pub total_line_offsets: usize,
+    pub total_memory_pressure: usize,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct CsvFilterResult {
-    pub header: Vec<String>,
-    pub rows: Vec<Vec<String>>,
-    pub match_count: usize,
-    pub scanned_count: usize,
-    pub truncated: bool,
-    pub error: String,
-}
 
-#[derive(Clone)]
-struct CsvIndexCache {
-    delimiter: u8,
-    header: Vec<String>,
-    row_offsets: Vec<u64>,
-    estimated_bytes: usize,
-    last_access: u64,
-}
 
-#[derive(Serialize, Deserialize)]
-pub struct CsvIndexResult {
-    pub delimiter: String,
-    pub header: Vec<String>,
-    pub row_count: usize,
-    pub estimated_bytes: usize,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct CsvRowsResult {
-    pub delimiter: String,
-    pub header: Vec<String>,
-    pub rows: Vec<Vec<String>>,
-    pub row_count: usize,
-    pub col_count: usize,
-    pub offset: usize,
-    pub truncated: bool,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct JsonPathLookupResult {
-    pub found: bool,
-    pub path: String,
-    pub kind: String,
-    pub depth: usize,
-    pub from: u64,
-    pub to: u64,
-    pub child_count: usize,
-    pub line: usize,
-    pub col: usize,
-    pub truncated: bool,
-    pub error: String,
-}
 
 fn detect_encoding(bytes: &[u8]) -> &'static Encoding {
     // Check BOM first
@@ -475,285 +352,6 @@ fn decode_with_encoding(bytes: &[u8], encoding_name: &str) -> String {
     content.to_string()
 }
 
-fn unquote_filter_value(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.len() >= 2 {
-        let first = trimmed.as_bytes()[0] as char;
-        let last = trimmed.as_bytes()[trimmed.len() - 1] as char;
-        if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
-            return trimmed[1..trimmed.len() - 1]
-                .replace("\\\"", "\"")
-                .replace("\\'", "'")
-                .replace("\\\\", "\\");
-        }
-    }
-    trimmed.to_string()
-}
-
-fn tokenize_log_query(raw_query: &str) -> Result<Vec<String>, String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-
-    for ch in raw_query.trim().chars() {
-        if let Some(q) = quote {
-            current.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-
-        if ch == '"' || ch == '\'' {
-            quote = Some(ch);
-            current.push(ch);
-            continue;
-        }
-
-        if ch.is_whitespace() || ch == ',' {
-            if !current.is_empty() {
-                tokens.push(std::mem::take(&mut current));
-            }
-            continue;
-        }
-
-        current.push(ch);
-    }
-
-    if quote.is_some() {
-        return Err("Unterminated quoted value in filter.".to_string());
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    Ok(tokens)
-}
-
-fn parse_log_predicate(raw_token: &str) -> Result<LogPredicate, String> {
-    let token = raw_token.trim();
-    if token.is_empty() {
-        return Err("Empty filter term.".to_string());
-    }
-    if let Some(split_at) = token.find(':') {
-        let field = token[..split_at].trim().to_lowercase();
-        let raw_value = unquote_filter_value(&token[split_at + 1..]);
-        let value = raw_value.to_lowercase();
-        if value.is_empty() {
-            return Err(format!("Filter value missing for field \"{}\".", field));
-        }
-        if field == "re" || field == "regex" {
-            return build_log_regex(&raw_value).map(LogPredicate::Regex);
-        }
-        if field == "severity" {
-            return Ok(LogPredicate::Severity(value));
-        }
-        if field == "ip" || field == "text" || field == "msg" || field == "message" {
-            return Ok(LogPredicate::Contains(value));
-        }
-        return Ok(LogPredicate::FieldContains { field, value });
-    }
-
-    let value = unquote_filter_value(token).to_lowercase();
-    if value.is_empty() {
-        return Err("Empty text filter.".to_string());
-    }
-    Ok(LogPredicate::Contains(value))
-}
-
-fn build_log_regex(raw: &str) -> Result<Regex, String> {
-    let value = unquote_filter_value(raw);
-    let (pattern, flags) = if value.starts_with('/') {
-        if let Some(last_slash) = value.rfind('/') {
-            if last_slash > 0 {
-                (&value[1..last_slash], &value[last_slash + 1..])
-            } else {
-                (value.as_str(), "i")
-            }
-        } else {
-            (value.as_str(), "i")
-        }
-    } else {
-        (value.as_str(), "i")
-    };
-
-    if pattern.is_empty() {
-        return Err("Regex pattern is empty".to_string());
-    }
-    if pattern.len() > 256 {
-        return Err("Regex too long (max 256 chars)".to_string());
-    }
-
-    let mut builder = RegexBuilder::new(pattern);
-    builder.case_insensitive(flags.contains('i'));
-    builder.multi_line(flags.contains('m'));
-    builder.dot_matches_new_line(flags.contains('s'));
-    builder.size_limit(2 * 1024 * 1024);
-    builder
-        .build()
-        .map_err(|err| format!("Invalid regex: {}", err))
-}
-
-fn compile_log_query_native(raw_query: &str) -> Result<CompiledLogQuery, String> {
-    let input = raw_query.trim();
-    if input.is_empty() {
-        return Err("Filter is empty.".to_string());
-    }
-    let tokens = tokenize_log_query(input)?;
-    if tokens.is_empty() {
-        return Err("Filter is empty.".to_string());
-    }
-
-    let mut clauses: Vec<Vec<LogCondition>> = Vec::new();
-    let mut current: Vec<LogCondition> = Vec::new();
-    let mut pending_not = false;
-    let mut term_count = 0;
-
-    for raw in tokens {
-        let upper = raw.to_uppercase();
-        if raw == "||" || upper == "OR" {
-            if current.is_empty() {
-                return Err("Unexpected OR operator in filter.".to_string());
-            }
-            clauses.push(std::mem::take(&mut current));
-            pending_not = false;
-            continue;
-        }
-        if raw == "&&" || upper == "AND" {
-            continue;
-        }
-        if raw == "!" || upper == "NOT" {
-            pending_not = !pending_not;
-            continue;
-        }
-
-        let mut token = raw.as_str();
-        while token.starts_with('!') {
-            pending_not = !pending_not;
-            token = &token[1..];
-        }
-        if token.is_empty() {
-            return Err("Invalid NOT usage in filter.".to_string());
-        }
-
-        let predicate = parse_log_predicate(token)?;
-        current.push(LogCondition {
-            token: token.to_string(),
-            negate: pending_not,
-            predicate,
-        });
-        pending_not = false;
-        term_count += 1;
-    }
-
-    if pending_not {
-        return Err("Filter cannot end with NOT.".to_string());
-    }
-    if current.is_empty() {
-        return Err("Filter cannot end with OR.".to_string());
-    }
-    clauses.push(current);
-
-    Ok(CompiledLogQuery { clauses, term_count })
-}
-
-fn matches_log_predicate(predicate: &LogPredicate, line: &str, lower: &str) -> bool {
-    match predicate {
-        LogPredicate::Contains(value) => lower.contains(value),
-        LogPredicate::FieldContains { field, value } => {
-            lower.contains(&format!("{}={}", field, value)) || lower.contains(&format!("{}:{}", field, value))
-        }
-        LogPredicate::Regex(regex) => regex.is_match(line),
-        LogPredicate::Severity(value) => lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|part| part == value),
-    }
-}
-
-fn matches_compiled_log_query(compiled: &CompiledLogQuery, line: &str) -> bool {
-    let lower = line.to_lowercase();
-    for clause in &compiled.clauses {
-        let mut matches = true;
-        for cond in clause {
-            let result = matches_log_predicate(&cond.predicate, line, &lower);
-            if (cond.negate && result) || (!cond.negate && !result) {
-                matches = false;
-                break;
-            }
-        }
-        if matches {
-            return true;
-        }
-    }
-    false
-}
-
-fn log_clause_info(compiled: &CompiledLogQuery) -> Vec<Vec<LogClauseInfo>> {
-    compiled
-        .clauses
-        .iter()
-        .map(|clause| {
-            clause
-                .iter()
-                .map(|cond| LogClauseInfo {
-                    token: cond.token.clone(),
-                    negate: cond.negate,
-                })
-                .collect()
-        })
-        .collect()
-}
-
-fn normalize_json_path(raw_path: &str) -> String {
-    let input = raw_path.trim().trim_start_matches("path:").trim();
-    if input.is_empty() || input == "$" {
-        return "$".to_string();
-    }
-    if input.starts_with('$') {
-        return input.to_string();
-    }
-
-    let mut out = "$".to_string();
-    let mut token = String::new();
-    let chars: Vec<char> = input.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            '.' => {
-                if !token.is_empty() {
-                    out.push('.');
-                    out.push_str(&token);
-                    token.clear();
-                }
-            }
-            '[' => {
-                if !token.is_empty() {
-                    out.push('.');
-                    out.push_str(&token);
-                    token.clear();
-                }
-                let mut bracket = String::new();
-                while i < chars.len() {
-                    bracket.push(chars[i]);
-                    if chars[i] == ']' {
-                        break;
-                    }
-                    i += 1;
-                }
-                out.push_str(&bracket);
-            }
-            ch => token.push(ch),
-        }
-        i += 1;
-    }
-    if !token.is_empty() {
-        out.push('.');
-        out.push_str(&token);
-    }
-    out
-}
 
 fn line_col_for_session_offset(session: &FileSession, offset: u64) -> Result<(usize, usize), String> {
     let mut file = fs::File::open(&session.path).map_err(|e| format!("Failed to open file: {}", e))?;
@@ -784,369 +382,6 @@ fn line_col_for_session_offset(session: &FileSession, offset: u64) -> Result<(us
     Ok((line, col))
 }
 
-fn file_modified_millis(path: &Path) -> u128 {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
-fn json_cache_key(session: &FileSession, max_nodes: usize, max_depth: usize, max_bytes: u64) -> String {
-    let mut hasher = DefaultHasher::new();
-    session.path.to_string_lossy().hash(&mut hasher);
-    session.size.hash(&mut hasher);
-    file_modified_millis(&session.path).hash(&mut hasher);
-    max_nodes.hash(&mut hasher);
-    max_depth.hash(&mut hasher);
-    max_bytes.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
-fn json_cache_dir() -> PathBuf {
-    std::env::temp_dir().join("crabtree-index-cache").join("json")
-}
-
-fn json_cache_path(cache_key: &str) -> PathBuf {
-    json_cache_dir().join(format!("v{}-{}.json", JSON_INDEX_DISK_VERSION, cache_key))
-}
-
-fn estimate_json_index_bytes(nodes: &[JsonIndexNode]) -> usize {
-    nodes
-        .iter()
-        .map(|node| std::mem::size_of::<JsonIndexNode>() + node.path.len() + node.kind.len())
-        .sum()
-}
-
-fn load_json_index_from_disk(cache_key: &str) -> Option<JsonIndexCache> {
-    let path = json_cache_path(cache_key);
-    let raw = fs::read_to_string(path).ok()?;
-    let persisted: PersistedJsonIndexCache = serde_json::from_str(&raw).ok()?;
-    if persisted.version != JSON_INDEX_DISK_VERSION || persisted.cache_key != cache_key {
-        return None;
-    }
-    Some(persisted.cache)
-}
-
-fn persist_json_index_to_disk(cache: &JsonIndexCache) {
-    if cache.error.is_empty() {
-        let _ = fs::create_dir_all(json_cache_dir());
-        let path = json_cache_path(&cache.cache_key);
-        let persisted = PersistedJsonIndexCache {
-            version: JSON_INDEX_DISK_VERSION,
-            cache_key: cache.cache_key.clone(),
-            cache: cache.clone(),
-        };
-        if let Ok(raw) = serde_json::to_string(&persisted) {
-            let _ = fs::write(path, raw);
-        }
-    }
-}
-
-struct JsonScanner {
-    bytes: Vec<u8>,
-    pos: usize,
-    nodes: Vec<JsonIndexNode>,
-    max_nodes: usize,
-    max_depth: usize,
-    truncated: bool,
-}
-
-impl JsonScanner {
-    fn new(bytes: Vec<u8>, max_nodes: usize, max_depth: usize) -> Self {
-        Self {
-            bytes,
-            pos: 0,
-            nodes: Vec::new(),
-            max_nodes,
-            max_depth,
-            truncated: false,
-        }
-    }
-
-    fn scan(mut self) -> JsonIndexResult {
-        let result = self.parse_value("$".to_string(), 0, None);
-        match result {
-            Ok(_) => JsonIndexResult {
-                nodes: self.nodes,
-                truncated: self.truncated,
-                error: String::new(),
-            },
-            Err(error) => JsonIndexResult {
-                nodes: self.nodes,
-                truncated: self.truncated,
-                error,
-            },
-        }
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.bytes.get(self.pos).copied()
-    }
-
-    fn bump(&mut self) -> Option<u8> {
-        let ch = self.peek()?;
-        self.pos += 1;
-        Some(ch)
-    }
-
-    fn skip_ws(&mut self) {
-        while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
-            self.pos += 1;
-        }
-    }
-
-    fn add_node(
-        &mut self,
-        path: String,
-        kind: &str,
-        depth: usize,
-        from: usize,
-        parent_id: Option<usize>,
-    ) -> Option<usize> {
-        if self.nodes.len() >= self.max_nodes {
-            self.truncated = true;
-            return None;
-        }
-        let idx = self.nodes.len();
-        self.nodes.push(JsonIndexNode {
-            id: idx,
-            parent_id,
-            path,
-            kind: kind.to_string(),
-            depth,
-            from: from as u64,
-            to: from as u64,
-            child_count: 0,
-        });
-        Some(idx)
-    }
-
-    fn finish_node(&mut self, idx: Option<usize>, to: usize, child_count: usize) {
-        if let Some(i) = idx {
-            if let Some(node) = self.nodes.get_mut(i) {
-                node.to = to as u64;
-                node.child_count = child_count;
-            }
-        }
-    }
-
-    fn parse_value(&mut self, path: String, depth: usize, parent_id: Option<usize>) -> Result<(), String> {
-        self.skip_ws();
-        let start = self.pos;
-        match self.peek() {
-            Some(b'{') => self.parse_object(path, depth, start, parent_id),
-            Some(b'[') => self.parse_array(path, depth, start, parent_id),
-            Some(b'"') => {
-                let idx = self.add_node(path, "string", depth, start, parent_id);
-                self.parse_string()?;
-                self.finish_node(idx, self.pos, 0);
-                Ok(())
-            }
-            Some(b't') | Some(b'f') => {
-                let idx = self.add_node(path, "boolean", depth, start, parent_id);
-                self.parse_literal()?;
-                self.finish_node(idx, self.pos, 0);
-                Ok(())
-            }
-            Some(b'n') => {
-                let idx = self.add_node(path, "null", depth, start, parent_id);
-                self.parse_literal()?;
-                self.finish_node(idx, self.pos, 0);
-                Ok(())
-            }
-            Some(b'-' | b'0'..=b'9') => {
-                let idx = self.add_node(path, "number", depth, start, parent_id);
-                self.parse_number();
-                self.finish_node(idx, self.pos, 0);
-                Ok(())
-            }
-            _ => Err("Unexpected JSON token".to_string()),
-        }
-    }
-
-    fn parse_object(&mut self, path: String, depth: usize, start: usize, parent_id: Option<usize>) -> Result<(), String> {
-        let idx = self.add_node(path.clone(), "object", depth, start, parent_id);
-        self.bump();
-        self.skip_ws();
-        let mut child_count = 0;
-        if self.peek() == Some(b'}') {
-            self.bump();
-            self.finish_node(idx, self.pos, child_count);
-            return Ok(());
-        }
-
-        loop {
-            self.skip_ws();
-            if self.peek() != Some(b'"') {
-                return Err("Expected object key".to_string());
-            }
-            let key = self.parse_string()?;
-            self.skip_ws();
-            if self.bump() != Some(b':') {
-                return Err("Expected colon".to_string());
-            }
-            child_count += 1;
-            if depth < self.max_depth && !self.truncated {
-                self.parse_value(format!("{}.{}", path, key), depth + 1, idx)?;
-            } else {
-                self.skip_value()?;
-                self.truncated = true;
-            }
-            self.skip_ws();
-            match self.bump() {
-                Some(b',') => continue,
-                Some(b'}') => break,
-                _ => return Err("Expected comma or object end".to_string()),
-            }
-        }
-        self.finish_node(idx, self.pos, child_count);
-        Ok(())
-    }
-
-    fn parse_array(&mut self, path: String, depth: usize, start: usize, parent_id: Option<usize>) -> Result<(), String> {
-        let idx = self.add_node(path.clone(), "array", depth, start, parent_id);
-        self.bump();
-        self.skip_ws();
-        let mut child_count = 0;
-        if self.peek() == Some(b']') {
-            self.bump();
-            self.finish_node(idx, self.pos, child_count);
-            return Ok(());
-        }
-
-        loop {
-            if depth < self.max_depth && !self.truncated {
-                self.parse_value(format!("{}[{}]", path, child_count), depth + 1, idx)?;
-            } else {
-                self.skip_value()?;
-                self.truncated = true;
-            }
-            child_count += 1;
-            self.skip_ws();
-            match self.bump() {
-                Some(b',') => {
-                    self.skip_ws();
-                    continue;
-                }
-                Some(b']') => break,
-                _ => return Err("Expected comma or array end".to_string()),
-            }
-        }
-        self.finish_node(idx, self.pos, child_count);
-        Ok(())
-    }
-
-    fn parse_string(&mut self) -> Result<String, String> {
-        if self.bump() != Some(b'"') {
-            return Err("Expected string".to_string());
-        }
-        let mut out = String::new();
-        while let Some(ch) = self.bump() {
-            match ch {
-                b'\\' => {
-                    if let Some(next) = self.bump() {
-                        out.push(next as char);
-                    } else {
-                        return Err("Invalid escape".to_string());
-                    }
-                }
-                b'"' => return Ok(out),
-                _ => out.push(ch as char),
-            }
-        }
-        Err("Unterminated string".to_string())
-    }
-
-    fn parse_literal(&mut self) -> Result<(), String> {
-        while let Some(ch) = self.peek() {
-            if matches!(ch, b',' | b']' | b'}' | b' ' | b'\n' | b'\r' | b'\t') {
-                break;
-            }
-            self.pos += 1;
-        }
-        Ok(())
-    }
-
-    fn parse_number(&mut self) {
-        while let Some(ch) = self.peek() {
-            if !matches!(ch, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
-                break;
-            }
-            self.pos += 1;
-        }
-    }
-
-    fn skip_value(&mut self) -> Result<(), String> {
-        self.skip_ws();
-        match self.peek() {
-            Some(b'{') => self.skip_compound(b'{', b'}'),
-            Some(b'[') => self.skip_compound(b'[', b']'),
-            Some(b'"') => self.parse_string().map(|_| ()),
-            Some(_) => self.parse_literal(),
-            None => Err("Unexpected end of JSON".to_string()),
-        }
-    }
-
-    fn skip_compound(&mut self, open: u8, close: u8) -> Result<(), String> {
-        let mut depth = 0_usize;
-        while let Some(ch) = self.bump() {
-            if ch == b'"' {
-                self.pos -= 1;
-                self.parse_string()?;
-                continue;
-            }
-            if ch == open {
-                depth += 1;
-            } else if ch == close {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Ok(());
-                }
-            }
-        }
-        Err("Unterminated JSON structure".to_string())
-    }
-}
-
-fn build_json_index_cache(
-    session: &FileSession,
-    max_nodes: usize,
-    max_depth: usize,
-    max_bytes: u64,
-) -> Result<JsonIndexCache, String> {
-    let access = NEXT_CACHE_ACCESS.fetch_add(1, Ordering::Relaxed);
-    let cache_key = json_cache_key(session, max_nodes.max(1), max_depth.max(1), max_bytes);
-    if let Some(mut cache) = load_json_index_from_disk(&cache_key) {
-        cache.last_access = access;
-        return Ok(cache);
-    }
-
-    let read_len = session.size.min(max_bytes.max(1));
-    let mut file = fs::File::open(&session.path).map_err(|e| format!("Failed to open file: {}", e))?;
-    let mut bytes = vec![0_u8; read_len as usize];
-    if read_len > 0 {
-        file.read_exact(&mut bytes)
-            .map_err(|e| format!("Failed to read JSON for indexing: {}", e))?;
-    }
-    let result = JsonScanner::new(bytes, max_nodes.max(1), max_depth.max(1)).scan();
-    let estimated_bytes = estimate_json_index_bytes(&result.nodes);
-    let cache = JsonIndexCache {
-        nodes: result.nodes,
-        truncated: result.truncated || read_len < session.size,
-        error: result.error,
-        max_nodes: max_nodes.max(1),
-        max_depth: max_depth.max(1),
-        max_bytes,
-        estimated_bytes,
-        last_access: access,
-        cache_key,
-    };
-    persist_json_index_to_disk(&cache);
-    Ok(cache)
-}
-
 fn ensure_json_index(
     session_id: &str,
     max_nodes: usize,
@@ -1156,7 +391,6 @@ fn ensure_json_index(
     let session = get_session(session_id)?;
     if let Some(cache) = &session.json_index {
         if cache.max_nodes >= max_nodes && cache.max_depth >= max_depth && cache.max_bytes >= max_bytes {
-            // Touch access timestamp without full clone — only clone on return
             let access = NEXT_CACHE_ACCESS.fetch_add(1, Ordering::Relaxed);
             let mut sessions = FILE_SESSIONS
                 .lock()
@@ -1167,7 +401,6 @@ fn ensure_json_index(
                     c.last_access = access;
                 }
             }
-            // Clone once for the return value (unavoidable across lock boundary)
             let result = sessions.get(session_id)
                 .and_then(|s| s.json_index.clone())
                 .ok_or_else(|| "Session lost during index access".to_string())?;
@@ -1175,7 +408,8 @@ fn ensure_json_index(
         }
     }
 
-    let cache = build_json_index_cache(&session, max_nodes, max_depth, max_bytes)?;
+    let access = NEXT_CACHE_ACCESS.fetch_add(1, Ordering::Relaxed);
+    let cache = build_json_index_cache(&session.path, session.size, max_nodes, max_depth, max_bytes, access)?;
     let mut sessions = FILE_SESSIONS
         .lock()
         .map_err(|_| "File session lock poisoned".to_string())?;
@@ -1223,116 +457,6 @@ fn evict_json_indexes_if_needed(max_bytes: usize) {
     }
 }
 
-fn detect_csv_delimiter(sample: &[u8]) -> u8 {
-    let candidates = [b',', b';', b'\t', b'|'];
-    let mut best = b',';
-    let mut best_count = 0_usize;
-    for candidate in candidates {
-        let mut count = 0_usize;
-        let mut in_quotes = false;
-        for byte in sample.iter().take(2048) {
-            if *byte == b'"' {
-                in_quotes = !in_quotes;
-            } else if !in_quotes && *byte == candidate {
-                count += 1;
-            }
-        }
-        if count > best_count {
-            best_count = count;
-            best = candidate;
-        }
-    }
-    best
-}
-
-fn parse_csv_record(line: &str, delimiter: char) -> Vec<String> {
-    let mut cells = Vec::new();
-    let mut field = String::new();
-    let mut chars = line.chars().peekable();
-    let mut in_quotes = false;
-    while let Some(ch) = chars.next() {
-        if in_quotes {
-            if ch == '"' {
-                if chars.peek() == Some(&'"') {
-                    field.push('"');
-                    chars.next();
-                } else {
-                    in_quotes = false;
-                }
-            } else {
-                field.push(ch);
-            }
-        } else if ch == '"' {
-            in_quotes = true;
-        } else if ch == delimiter {
-            cells.push(std::mem::take(&mut field));
-        } else if ch != '\r' && ch != '\n' {
-            field.push(ch);
-        }
-    }
-    cells.push(field);
-    cells
-}
-
-fn build_csv_index(session: &FileSession) -> Result<CsvIndexCache, String> {
-    let mut file = fs::File::open(&session.path).map_err(|e| format!("Failed to open CSV: {}", e))?;
-    let mut sample = vec![0_u8; session.size.min(4096) as usize];
-    if !sample.is_empty() {
-        file.read_exact(&mut sample)
-            .map_err(|e| format!("Failed to read CSV sample: {}", e))?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|e| format!("Failed to seek CSV: {}", e))?;
-    }
-    let delimiter = detect_csv_delimiter(&sample);
-    let mut row_offsets = Vec::new();
-    let mut buf = vec![0_u8; 1024 * 1024];
-    let mut absolute = 0_u64;
-    let mut row_start = 0_u64;
-    let mut in_quotes = false;
-    let mut header_end = None;
-    let mut header_bytes = Vec::new();
-
-    loop {
-        let read = file.read(&mut buf).map_err(|e| format!("Failed to index CSV: {}", e))?;
-        if read == 0 {
-            break;
-        }
-        for (idx, byte) in buf[..read].iter().enumerate() {
-            let pos = absolute + idx as u64;
-            if *byte == b'"' {
-                in_quotes = !in_quotes;
-            }
-            if !in_quotes && *byte == b'\n' {
-                if header_end.is_none() {
-                    header_end = Some(pos + 1);
-                } else {
-                    row_offsets.push(row_start);
-                }
-                row_start = pos + 1;
-            }
-        }
-        if header_end.is_none() {
-            header_bytes.extend_from_slice(&buf[..read]);
-        }
-        absolute += read as u64;
-    }
-    if header_end.is_some() && row_start < session.size {
-        row_offsets.push(row_start);
-    }
-
-    let header_cut = header_bytes.iter().position(|b| *b == b'\n').unwrap_or(header_bytes.len());
-    let header_text = decode_with_encoding(&header_bytes[..header_cut], &session.encoding_name);
-    let header = parse_csv_record(&header_text, delimiter as char);
-    let estimated_bytes = row_offsets.len() * std::mem::size_of::<u64>() + header.iter().map(|h| h.len()).sum::<usize>();
-    Ok(CsvIndexCache {
-        delimiter,
-        header,
-        row_offsets,
-        estimated_bytes,
-        last_access: NEXT_CACHE_ACCESS.fetch_add(1, Ordering::Relaxed),
-    })
-}
-
 fn ensure_csv_index(session_id: &str) -> Result<CsvIndexCache, String> {
     let session = get_session(session_id)?;
     if let Some(mut cache) = session.csv_index.clone() {
@@ -1347,7 +471,8 @@ fn ensure_csv_index(session_id: &str) -> Result<CsvIndexCache, String> {
         return Ok(cache);
     }
 
-    let cache = build_csv_index(&session)?;
+    let access = NEXT_CACHE_ACCESS.fetch_add(1, Ordering::Relaxed);
+    let cache = build_csv_index(&session.path, session.size, &session.encoding_name, access)?;
     let mut sessions = FILE_SESSIONS
         .lock()
         .map_err(|_| "File session lock poisoned".to_string())?;
@@ -1883,49 +1008,7 @@ fn index_csv_session(session_id: String) -> Result<CsvIndexResult, String> {
 fn get_csv_rows(session_id: String, offset: usize, limit: usize) -> Result<CsvRowsResult, String> {
     let session = get_session(&session_id)?;
     let index = ensure_csv_index(&session_id)?;
-    let row_count = index.row_offsets.len();
-    let start = offset.min(row_count);
-    let end = (start + limit.max(1)).min(row_count);
-    let mut file = fs::File::open(&session.path).map_err(|e| format!("Failed to open CSV: {}", e))?;
-    let mut rows = Vec::with_capacity(end.saturating_sub(start));
-    let delimiter = index.delimiter as char;
-
-    for idx in start..end {
-        let from = index.row_offsets[idx];
-        let to = if idx + 1 < row_count { index.row_offsets[idx + 1] } else { session.size };
-        let len = (to - from).min(1024 * 1024);
-        let mut bytes = vec![0_u8; len as usize];
-        file.seek(SeekFrom::Start(from))
-            .map_err(|e| format!("Failed to seek CSV row: {}", e))?;
-        file.read_exact(&mut bytes)
-            .map_err(|e| format!("Failed to read CSV row: {}", e))?;
-        let text = decode_with_encoding(&bytes, &session.encoding_name);
-        rows.push(parse_csv_record(&text, delimiter));
-    }
-
-    let mut col_count = index.header.len().max(1);
-    for row in &rows {
-        col_count = col_count.max(row.len());
-    }
-    let mut header = index.header;
-    while header.len() < col_count {
-        header.push(format!("col_{}", header.len() + 1));
-    }
-    for row in &mut rows {
-        while row.len() < col_count {
-            row.push(String::new());
-        }
-    }
-
-    Ok(CsvRowsResult {
-        delimiter: if index.delimiter == b'\t' { "\\t".to_string() } else { delimiter.to_string() },
-        header,
-        rows,
-        row_count,
-        col_count,
-        offset: start,
-        truncated: end < row_count,
-    })
+    get_csv_rows_paged(&session.path, session.size, &session.encoding_name, &index, offset, limit)
 }
 
 #[tauri::command]
@@ -2259,10 +1342,12 @@ fn get_session_diagnostics() -> Result<SessionDiagnosticsResult, String> {
         let line_offset_count = s.line_offsets.as_ref().map(|o| o.len()).unwrap_or(0);
         let csv_row_count = s.csv_index.as_ref().map(|c| c.row_offsets.len()).unwrap_or(0);
         let csv_estimated_bytes = s.csv_index.as_ref().map(|c| c.estimated_bytes).unwrap_or(0);
+        let line_offset_bytes = line_offset_count * std::mem::size_of::<u64>();
 
         total_json_bytes += json_estimated_bytes;
         total_csv_bytes += csv_estimated_bytes;
         total_line_offsets += line_offset_count;
+        let total_estimated_bytes = json_estimated_bytes + csv_estimated_bytes + line_offset_bytes;
 
         entries.push(SessionDiagnosticEntry {
             session_id: id.clone(),
@@ -2277,6 +1362,7 @@ fn get_session_diagnostics() -> Result<SessionDiagnosticsResult, String> {
             has_csv_index: s.csv_index.is_some(),
             csv_row_count,
             csv_estimated_bytes,
+            total_estimated_bytes,
         });
     }
 
@@ -2286,6 +1372,7 @@ fn get_session_diagnostics() -> Result<SessionDiagnosticsResult, String> {
         total_json_bytes,
         total_csv_bytes,
         total_line_offsets,
+        total_memory_pressure: total_json_bytes + total_csv_bytes + total_line_offsets * std::mem::size_of::<u64>(),
     })
 }
 
@@ -2302,70 +1389,45 @@ fn filter_csv_rows(
     let cancel_key = format!("csv-filter-{}", session_id);
     let cancelled = register_cancel_token(&cancel_key);
 
-    if pattern.trim().is_empty() {
-        return Err("Filter pattern is empty".to_string());
-    }
-    if pattern.len() > 256 {
-        return Err("Filter pattern too long (max 256 chars)".to_string());
-    }
-
-    let re = RegexBuilder::new(&pattern)
-        .case_insensitive(case_insensitive)
-        .size_limit(2 * 1024 * 1024)
-        .build()
-        .map_err(|e| format!("Invalid filter regex: {}", e))?;
-
-    let capped_max = max_results.max(1).min(5000);
-    let row_count = index.row_offsets.len();
-    let delimiter = index.delimiter as char;
-    let mut file = fs::File::open(&session.path)
-        .map_err(|e| format!("Failed to open CSV: {}", e))?;
-    let mut matched_rows = Vec::new();
-    let mut scanned = 0_usize;
-    let mut was_cancelled = false;
-
-    for idx in 0..row_count {
-        // Cooperative cancellation check every 1024 rows
-        if scanned & 0x3FF == 0 && scanned > 0 && cancelled.load(Ordering::Relaxed) {
-            was_cancelled = true;
-            METRIC_CANCELLATIONS.fetch_add(1, Ordering::Relaxed);
-            break;
-        }
-
-        let from = index.row_offsets[idx];
-        let to = if idx + 1 < row_count { index.row_offsets[idx + 1] } else { session.size };
-        let len = (to - from).min(1024 * 1024);
-        let mut bytes = vec![0_u8; len as usize];
-        file.seek(SeekFrom::Start(from))
-            .map_err(|e| format!("Failed to seek CSV row: {}", e))?;
-        file.read_exact(&mut bytes)
-            .map_err(|e| format!("Failed to read CSV row: {}", e))?;
-        let text = decode_with_encoding(&bytes, &session.encoding_name);
-        let cells = parse_csv_record(&text, delimiter);
-        scanned += 1;
-
-        let cell_value = cells.get(column_index).map(|s| s.as_str()).unwrap_or("");
-        if re.is_match(cell_value) {
-            matched_rows.push(cells);
-            if matched_rows.len() >= capped_max {
-                break;
-            }
-        }
-    }
+    let result = filter_csv_rows_impl(
+        &session.path, session.size, &session.encoding_name, &index,
+        column_index, &pattern, max_results, case_insensitive,
+        &cancelled, &METRIC_CANCELLATIONS,
+    );
 
     // Clean up cancel token
     if let Ok(mut tokens) = CANCEL_TOKENS.lock() {
         tokens.remove(&cancel_key);
     }
 
-    Ok(CsvFilterResult {
-        header: index.header,
-        rows: matched_rows,
-        match_count: scanned,
-        scanned_count: scanned,
-        truncated: was_cancelled || scanned < row_count,
-        error: if was_cancelled { "cancelled".to_string() } else { String::new() },
-    })
+    result
+}
+
+
+#[tauri::command]
+fn sort_csv_rows(
+    session_id: String,
+    column_index: usize,
+    ascending: bool,
+    offset: usize,
+    limit: usize,
+) -> Result<CsvSortResult, String> {
+    let session = get_session(&session_id)?;
+    let index = ensure_csv_index(&session_id)?;
+    let cancel_key = format!("csv-sort-{}", session_id);
+    let cancelled = register_cancel_token(&cancel_key);
+
+    let result = sort_csv_rows_impl(
+        &session.path, session.size, &session.encoding_name, &index,
+        column_index, ascending, offset, limit,
+        &cancelled, &METRIC_CANCELLATIONS,
+    );
+
+    if let Ok(mut tokens) = CANCEL_TOKENS.lock() {
+        tokens.remove(&cancel_key);
+    }
+
+    result
 }
 
 #[tauri::command]
@@ -2441,6 +1503,7 @@ pub fn run() {
             index_csv_session,
             get_csv_rows,
             filter_csv_rows,
+            sort_csv_rows,
             compact_session_caches,
             save_file,
             save_file_as,

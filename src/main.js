@@ -4311,6 +4311,13 @@ function compactInactiveLargeTabs() {
     if (tab.id === state.activeTabId) continue;
     if (tab.largeFileMode || tab.size >= state.largeFileWarnThreshold) {
       disposeTabHeavyState(tab);
+      // Aggressive content eviction for session-backed tabs (Issue #6).
+      // The content can be re-fetched from Rust via read_file_range on reactivation.
+      if (tab.fileSessionId && tab.content && tab.content.length > 0) {
+        tab._evictedContent = true;
+        tab.content = null;
+        tab.fullContent = null;
+      }
     }
   }
   const active = state.tabs.find(t => t.id === state.activeTabId);
