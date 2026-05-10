@@ -1,4 +1,4 @@
-﻿// ============================================
+// ============================================
 // CRAB TREE — Main Application Module
 // ============================================
 
@@ -1104,6 +1104,8 @@ function doCloseTab(id) {
     clearTimeout(autoSaveTimers[id]);
     delete autoSaveTimers[id];
   }
+  // Dispose all heavy state to prevent retention after splice
+  disposeTabFullState(tab);
   state.tabs.splice(idx, 1);
   document.querySelector(`.tab[data-id="${id}"]`)?.remove();
 
@@ -1114,9 +1116,13 @@ function doCloseTab(id) {
       state.activeTabId = null;
       document.getElementById('welcome-screen').classList.remove('hidden');
       updateStatusBarEmpty();
+      // All tabs closed — cancel any stale worker requests
+      workerBridge.cancelAll();
     }
   }
   scheduleSessionSave();
+  // Trigger compaction after tab removal
+  scheduleMemoryCleanup();
 }
 
 // ─── Close Confirm Dialog ───
@@ -1511,6 +1517,8 @@ async function applyLogQuery(tab, rawQuery) {
   try {
     let result;
     if (tab.fileSessionId && tab.partial) {
+      // Cancel any in-flight native filter for this session
+      invoke('cancel_filter', { sessionId: tab.fileSessionId }).catch(() => {});
       const native = await invoke('filter_log_session', {
         sessionId: tab.fileSessionId,
         rawQuery,
@@ -4282,6 +4290,22 @@ function disposeTabHeavyState(tab) {
   tab._secretCacheKey = '';
 }
 
+// Full state disposal for tab teardown — nullifies all heavy fields
+function disposeTabFullState(tab) {
+  if (!tab) return;
+  const query = ensureQueryState(tab);
+  query.previewContent = null;
+  query.pathCatalog = [];
+  query.pathCatalogSignature = '';
+  query.pathTokens = null;
+  query.locateResult = null;
+  query.clauses = [];
+  tab._secretFindings = null;
+  tab._secretCacheKey = '';
+  tab.content = null;
+  tab.fullContent = null;
+}
+
 function compactInactiveLargeTabs() {
   for (const tab of state.tabs) {
     if (tab.id === state.activeTabId) continue;
@@ -4419,14 +4443,19 @@ async function init() {
   updateTrustBadge();
   await loadWorkspaceExtensions();
 
-  // Session cleanup: clear approved paths on app quit
-  window.addEventListener('beforeunload', async () => {
-    try {
-      await invoke('clear_approved_paths');
-    } catch (err) {
-      console.warn('Failed to clear approved paths:', err);
-    }
+  // Session cleanup: clear approved paths and close all file sessions on app quit
+  window.addEventListener('beforeunload', () => {
+    // Fire-and-forget: close all Rust sessions and clear paths
+    invoke('close_all_file_sessions').catch(() => {});
+    invoke('clear_approved_paths').catch(() => {});
+    // Dispose worker bridge to terminate worker thread
+    workerBridge.dispose();
   });
+
+  // Periodic idle session sweep — evict Rust sessions older than 10 minutes every 60s
+  setInterval(() => {
+    invoke('evict_inactive_sessions', { maxAgeSecs: 600 }).catch(() => {});
+  }, 60_000);
 
   console.log('Crab Tree initialized');
 }

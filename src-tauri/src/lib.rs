@@ -6,8 +6,8 @@ use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
@@ -16,6 +16,43 @@ use regex::{Regex, RegexBuilder};
 
 mod engine;
 use engine::cache::{JSON_INDEX_DISK_VERSION, JSON_INDEX_MEMORY_CAP_BYTES};
+use engine::sessions::{MAX_SESSION_PREVIEW_BYTES, MAX_RANGE_READ_BYTES, MAX_LINE_READ_BYTES, MAX_SESSION_COUNT, DEFAULT_INACTIVITY_TTL_SECS};
+
+// ─── Cancellation Token Registry ───
+/// Maps operation keys to cancel flags for cooperative cancellation.
+static CANCEL_TOKENS: Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> = Lazy::new(|| {
+    Mutex::new(HashMap::new())
+});
+
+fn register_cancel_token(key: &str) -> Arc<AtomicBool> {
+    let token = Arc::new(AtomicBool::new(false));
+    if let Ok(mut tokens) = CANCEL_TOKENS.lock() {
+        // Cancel any previous operation with same key
+        if let Some(prev) = tokens.get(key) {
+            prev.store(true, Ordering::Relaxed);
+        }
+        tokens.insert(key.to_string(), token.clone());
+    }
+    token
+}
+
+fn cancel_token(key: &str) -> bool {
+    if let Ok(mut tokens) = CANCEL_TOKENS.lock() {
+        if let Some(token) = tokens.remove(key) {
+            token.store(true, Ordering::Relaxed);
+            return true;
+        }
+    }
+    false
+}
+
+// ─── Lifecycle Metrics (lightweight atomic counters) ───
+static METRIC_SESSIONS_CREATED: AtomicU64 = AtomicU64::new(0);
+static METRIC_SESSIONS_CLOSED: AtomicU64 = AtomicU64::new(0);
+static METRIC_FORCED_EVICTIONS: AtomicU64 = AtomicU64::new(0);
+static METRIC_EXPIRED_EVICTIONS: AtomicU64 = AtomicU64::new(0);
+static METRIC_CANCELLATIONS: AtomicU64 = AtomicU64::new(0);
+static METRIC_COMPACTIONS: AtomicU64 = AtomicU64::new(0);
 
 // ─── Allowlist for approved file/folder access (Security) ───
 /// Tracks paths approved by user through dialogs.
@@ -33,6 +70,8 @@ struct FileSession {
     json_index: Option<JsonIndexCache>,
     csv_index: Option<CsvIndexCache>,
     last_access: u64,
+    created_at: Instant,
+    last_access_at: Instant,
 }
 
 static FILE_SESSIONS: Lazy<Mutex<HashMap<String, FileSession>>> = Lazy::new(|| {
@@ -307,6 +346,47 @@ pub struct SessionCacheStats {
 pub struct SessionCompactResult {
     pub compacted_sessions: usize,
     pub freed_estimated_bytes: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SessionEvictResult {
+    pub evicted_count: usize,
+    pub remaining_count: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SessionDiagnosticEntry {
+    pub session_id: String,
+    pub path: String,
+    pub size: u64,
+    pub age_secs: u64,
+    pub has_json_index: bool,
+    pub json_node_count: usize,
+    pub json_estimated_bytes: usize,
+    pub has_line_offsets: bool,
+    pub line_offset_count: usize,
+    pub has_csv_index: bool,
+    pub csv_row_count: usize,
+    pub csv_estimated_bytes: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SessionDiagnosticsResult {
+    pub sessions: Vec<SessionDiagnosticEntry>,
+    pub total_sessions: usize,
+    pub total_json_bytes: usize,
+    pub total_csv_bytes: usize,
+    pub total_line_offsets: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct CsvFilterResult {
+    pub header: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub match_count: usize,
+    pub scanned_count: usize,
+    pub truncated: bool,
+    pub error: String,
 }
 
 #[derive(Clone)]
@@ -1076,16 +1156,22 @@ fn ensure_json_index(
     let session = get_session(session_id)?;
     if let Some(cache) = &session.json_index {
         if cache.max_nodes >= max_nodes && cache.max_depth >= max_depth && cache.max_bytes >= max_bytes {
-            let mut cache = cache.clone();
-            cache.last_access = NEXT_CACHE_ACCESS.fetch_add(1, Ordering::Relaxed);
+            // Touch access timestamp without full clone — only clone on return
+            let access = NEXT_CACHE_ACCESS.fetch_add(1, Ordering::Relaxed);
             let mut sessions = FILE_SESSIONS
                 .lock()
                 .map_err(|_| "File session lock poisoned".to_string())?;
-            if let Some(session) = sessions.get_mut(session_id) {
-                session.last_access = cache.last_access;
-                session.json_index = Some(cache.clone());
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.last_access = access;
+                if let Some(ref mut c) = s.json_index {
+                    c.last_access = access;
+                }
             }
-            return Ok(cache);
+            // Clone once for the return value (unavoidable across lock boundary)
+            let result = sessions.get(session_id)
+                .and_then(|s| s.json_index.clone())
+                .ok_or_else(|| "Session lost during index access".to_string())?;
+            return Ok(result);
         }
     }
 
@@ -1327,7 +1413,7 @@ fn open_file_session(path: String, preview_bytes: u64) -> Result<FileContent, St
     }
 
     let size = metadata.len();
-    let capped_preview = preview_bytes.min(32 * 1024 * 1024).min(size);
+    let capped_preview = preview_bytes.min(MAX_SESSION_PREVIEW_BYTES).min(size);
     let mut file = fs::File::open(&canonical).map_err(|e| format!("Failed to open file: {}", e))?;
     let mut bytes = vec![0; capped_preview as usize];
     if capped_preview > 0 {
@@ -1349,11 +1435,29 @@ fn open_file_session(path: String, preview_bytes: u64) -> Result<FileContent, St
         json_index: None,
         csv_index: None,
         last_access: NEXT_CACHE_ACCESS.fetch_add(1, Ordering::Relaxed),
+        created_at: Instant::now(),
+        last_access_at: Instant::now(),
     };
-    FILE_SESSIONS
-        .lock()
-        .map_err(|_| "File session lock poisoned".to_string())?
-        .insert(session_id.clone(), session);
+    {
+        let mut sessions = FILE_SESSIONS
+            .lock()
+            .map_err(|_| "File session lock poisoned".to_string())?;
+        // Enforce session count cap: evict oldest inactive session(s) before insert
+        while sessions.len() >= MAX_SESSION_COUNT {
+            let oldest = sessions
+                .iter()
+                .min_by_key(|(_, s)| s.last_access)
+                .map(|(id, _)| id.clone());
+            if let Some(id) = oldest {
+                sessions.remove(&id);
+                METRIC_FORCED_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                break;
+            }
+        }
+        sessions.insert(session_id.clone(), session);
+        METRIC_SESSIONS_CREATED.fetch_add(1, Ordering::Relaxed);
+    }
 
     Ok(FileContent {
         content: content_string,
@@ -1393,7 +1497,7 @@ fn read_file_range(session_id: String, offset: u64, length: u64) -> Result<FileR
         });
     }
 
-    let capped_len = length.min(8 * 1024 * 1024).min(session.size - offset);
+    let capped_len = length.min(MAX_RANGE_READ_BYTES).min(session.size - offset);
     let mut file = fs::File::open(&session.path).map_err(|e| format!("Failed to open file: {}", e))?;
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| format!("Failed to seek file: {}", e))?;
@@ -1433,16 +1537,23 @@ fn close_file_session(session_id: String) -> Result<(), String> {
         .lock()
         .map_err(|_| "File session lock poisoned".to_string())?
         .remove(&session_id);
+    METRIC_SESSIONS_CLOSED.fetch_add(1, Ordering::Relaxed);
+    // Cancel any in-flight operations for this session
+    cancel_token(&format!("log-filter-{}", session_id));
+    cancel_token(&format!("csv-filter-{}", session_id));
     Ok(())
 }
 
 fn get_session(session_id: &str) -> Result<FileSession, String> {
-    FILE_SESSIONS
+    let mut sessions = FILE_SESSIONS
         .lock()
-        .map_err(|_| "File session lock poisoned".to_string())?
-        .get(session_id)
-        .cloned()
-        .ok_or_else(|| "Unknown file session".to_string())
+        .map_err(|_| "File session lock poisoned".to_string())?;
+    let session = sessions
+        .get_mut(session_id)
+        .ok_or_else(|| "Unknown file session".to_string())?;
+    // Touch wall-clock last access time on every read
+    session.last_access_at = Instant::now();
+    Ok(session.clone())
 }
 
 fn build_line_offsets(path: &Path) -> Result<Vec<u64>, String> {
@@ -1509,7 +1620,7 @@ fn get_log_lines(session_id: String, start_line: usize, count: usize) -> Result<
             lines.push(String::new());
             continue;
         }
-        let len = (to - from).min(1024 * 1024);
+        let len = (to - from).min(MAX_LINE_READ_BYTES);
         let mut bytes = vec![0_u8; len as usize];
         file.seek(SeekFrom::Start(from))
             .map_err(|e| format!("Failed to seek file: {}", e))?;
@@ -1532,6 +1643,9 @@ fn filter_log_session(
     max_results: usize,
 ) -> Result<LogFilterResult, String> {
     let session = get_session(&session_id)?;
+    let cancel_key = format!("log-filter-{}", session_id);
+    let cancelled = register_cancel_token(&cancel_key);
+
     let compiled = match compile_log_query_native(&raw_query) {
         Ok(compiled) => compiled,
         Err(error) => {
@@ -1555,8 +1669,9 @@ fn filter_log_session(
     let mut filtered_lines = Vec::new();
     let mut result_count = 0_usize;
     let mut total_count = 0_usize;
+    let mut was_cancelled = false;
 
-    loop {
+    'outer: loop {
         let read = file.read(&mut buf).map_err(|e| format!("Failed to scan log: {}", e))?;
         if read == 0 {
             break;
@@ -1573,6 +1688,12 @@ fn filter_log_session(
                             filtered_lines.push(trimmed.to_string());
                         }
                     }
+                    // Cooperative cancellation check every 8192 lines
+                    if total_count & 0x1FFF == 0 && cancelled.load(Ordering::Relaxed) {
+                        was_cancelled = true;
+                        METRIC_CANCELLATIONS.fetch_add(1, Ordering::Relaxed);
+                        break 'outer;
+                    }
                 }
                 line.clear();
             } else {
@@ -1581,7 +1702,7 @@ fn filter_log_session(
         }
     }
 
-    if !line.is_empty() {
+    if !was_cancelled && !line.is_empty() {
         let text = decode_with_encoding(&line, &session.encoding_name);
         let trimmed = text.trim_end_matches(|ch| ch == '\r' || ch == '\n');
         if !trimmed.trim().is_empty() {
@@ -1593,6 +1714,24 @@ fn filter_log_session(
                 }
             }
         }
+    }
+
+    // Clean up cancel token
+    if let Ok(mut tokens) = CANCEL_TOKENS.lock() {
+        tokens.remove(&cancel_key);
+    }
+
+    if was_cancelled {
+        return Ok(LogFilterResult {
+            error: "cancelled".to_string(),
+            filtered_lines,
+            result_count,
+            total_count,
+            clause_count: compiled.clauses.len(),
+            term_count: compiled.term_count,
+            clauses: log_clause_info(&compiled),
+            truncated: true,
+        });
     }
 
     Ok(LogFilterResult {
@@ -1681,6 +1820,9 @@ fn lookup_json_path_session(
     })
 }
 
+/// Hard cap on children per fetch to prevent unbounded response payloads.
+const MAX_JSON_CHILDREN_LIMIT: usize = 500;
+
 #[tauri::command]
 fn fetch_json_children(
     session_id: String,
@@ -1691,6 +1833,7 @@ fn fetch_json_children(
     max_depth: usize,
     max_bytes: u64,
 ) -> Result<JsonChildrenResult, String> {
+    let capped_limit = limit.max(1).min(MAX_JSON_CHILDREN_LIMIT);
     let cache = ensure_json_index(&session_id, max_nodes.max(1), max_depth.max(1), max_bytes)?;
     if !cache.error.is_empty() {
         return Ok(JsonChildrenResult {
@@ -1703,20 +1846,23 @@ fn fetch_json_children(
         });
     }
 
-    let children: Vec<JsonIndexNode> = cache
-        .nodes
-        .iter()
-        .filter(|node| node.parent_id == Some(node_id))
-        .cloned()
-        .collect();
-    let total = children.len();
+    // Avoid collecting all children — use skip/take for bounded iteration
+    let mut total = 0_usize;
+    let mut result_nodes = Vec::with_capacity(capped_limit);
+    for node in cache.nodes.iter() {
+        if node.parent_id == Some(node_id) {
+            if total >= offset && result_nodes.len() < capped_limit {
+                result_nodes.push(node.clone());
+            }
+            total += 1;
+        }
+    }
     let start = offset.min(total);
-    let end = (start + limit.max(1)).min(total);
     Ok(JsonChildrenResult {
         parent_id: node_id,
         offset: start,
         total,
-        nodes: children[start..end].to_vec(),
+        nodes: result_nodes,
         truncated: cache.truncated,
         error: String::new(),
     })
@@ -1843,6 +1989,23 @@ fn compact_session_caches(active_session_ids: Vec<String>) -> Result<SessionComp
         }
     }
 
+    // Also evict sessions with no remaining data to prevent empty session accumulation
+    let stale_ids: Vec<String> = sessions
+        .iter()
+        .filter(|(id, s)| {
+            !active.contains(*id)
+                && s.json_index.is_none()
+                && s.line_offsets.is_none()
+                && s.csv_index.is_none()
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &stale_ids {
+        sessions.remove(id);
+        compacted_sessions += 1;
+    }
+
+    METRIC_COMPACTIONS.fetch_add(1, Ordering::Relaxed);
     Ok(SessionCompactResult {
         compacted_sessions,
         freed_estimated_bytes,
@@ -2046,6 +2209,210 @@ fn run_task(
     })
 }
 
+fn evict_stale_sessions(max_age_secs: u64) -> usize {
+    let mut sessions = match FILE_SESSIONS.lock() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let now = Instant::now();
+    let stale: Vec<String> = sessions
+        .iter()
+        .filter(|(_, s)| now.duration_since(s.last_access_at).as_secs() > max_age_secs)
+        .map(|(id, _)| id.clone())
+        .collect();
+    let count = stale.len();
+    for id in stale {
+        sessions.remove(&id);
+    }
+    METRIC_EXPIRED_EVICTIONS.fetch_add(count as u64, Ordering::Relaxed);
+    count
+}
+
+#[tauri::command]
+fn evict_inactive_sessions(max_age_secs: u64) -> Result<SessionEvictResult, String> {
+    let age = if max_age_secs == 0 { DEFAULT_INACTIVITY_TTL_SECS } else { max_age_secs };
+    let evicted = evict_stale_sessions(age);
+    let remaining = FILE_SESSIONS
+        .lock()
+        .map(|s| s.len())
+        .unwrap_or(0);
+    Ok(SessionEvictResult {
+        evicted_count: evicted,
+        remaining_count: remaining,
+    })
+}
+
+#[tauri::command]
+fn get_session_diagnostics() -> Result<SessionDiagnosticsResult, String> {
+    let sessions = FILE_SESSIONS
+        .lock()
+        .map_err(|_| "File session lock poisoned".to_string())?;
+    let now = Instant::now();
+    let mut entries = Vec::with_capacity(sessions.len());
+    let mut total_json_bytes = 0_usize;
+    let mut total_csv_bytes = 0_usize;
+    let mut total_line_offsets = 0_usize;
+
+    for (id, s) in sessions.iter() {
+        let json_node_count = s.json_index.as_ref().map(|c| c.nodes.len()).unwrap_or(0);
+        let json_estimated_bytes = s.json_index.as_ref().map(|c| c.estimated_bytes).unwrap_or(0);
+        let line_offset_count = s.line_offsets.as_ref().map(|o| o.len()).unwrap_or(0);
+        let csv_row_count = s.csv_index.as_ref().map(|c| c.row_offsets.len()).unwrap_or(0);
+        let csv_estimated_bytes = s.csv_index.as_ref().map(|c| c.estimated_bytes).unwrap_or(0);
+
+        total_json_bytes += json_estimated_bytes;
+        total_csv_bytes += csv_estimated_bytes;
+        total_line_offsets += line_offset_count;
+
+        entries.push(SessionDiagnosticEntry {
+            session_id: id.clone(),
+            path: s.path.to_string_lossy().to_string(),
+            size: s.size,
+            age_secs: now.duration_since(s.last_access_at).as_secs(),
+            has_json_index: s.json_index.is_some(),
+            json_node_count,
+            json_estimated_bytes,
+            has_line_offsets: s.line_offsets.is_some(),
+            line_offset_count,
+            has_csv_index: s.csv_index.is_some(),
+            csv_row_count,
+            csv_estimated_bytes,
+        });
+    }
+
+    Ok(SessionDiagnosticsResult {
+        total_sessions: entries.len(),
+        sessions: entries,
+        total_json_bytes,
+        total_csv_bytes,
+        total_line_offsets,
+    })
+}
+
+#[tauri::command]
+fn filter_csv_rows(
+    session_id: String,
+    column_index: usize,
+    pattern: String,
+    max_results: usize,
+    case_insensitive: bool,
+) -> Result<CsvFilterResult, String> {
+    let session = get_session(&session_id)?;
+    let index = ensure_csv_index(&session_id)?;
+    let cancel_key = format!("csv-filter-{}", session_id);
+    let cancelled = register_cancel_token(&cancel_key);
+
+    if pattern.trim().is_empty() {
+        return Err("Filter pattern is empty".to_string());
+    }
+    if pattern.len() > 256 {
+        return Err("Filter pattern too long (max 256 chars)".to_string());
+    }
+
+    let re = RegexBuilder::new(&pattern)
+        .case_insensitive(case_insensitive)
+        .size_limit(2 * 1024 * 1024)
+        .build()
+        .map_err(|e| format!("Invalid filter regex: {}", e))?;
+
+    let capped_max = max_results.max(1).min(5000);
+    let row_count = index.row_offsets.len();
+    let delimiter = index.delimiter as char;
+    let mut file = fs::File::open(&session.path)
+        .map_err(|e| format!("Failed to open CSV: {}", e))?;
+    let mut matched_rows = Vec::new();
+    let mut scanned = 0_usize;
+    let mut was_cancelled = false;
+
+    for idx in 0..row_count {
+        // Cooperative cancellation check every 1024 rows
+        if scanned & 0x3FF == 0 && scanned > 0 && cancelled.load(Ordering::Relaxed) {
+            was_cancelled = true;
+            METRIC_CANCELLATIONS.fetch_add(1, Ordering::Relaxed);
+            break;
+        }
+
+        let from = index.row_offsets[idx];
+        let to = if idx + 1 < row_count { index.row_offsets[idx + 1] } else { session.size };
+        let len = (to - from).min(1024 * 1024);
+        let mut bytes = vec![0_u8; len as usize];
+        file.seek(SeekFrom::Start(from))
+            .map_err(|e| format!("Failed to seek CSV row: {}", e))?;
+        file.read_exact(&mut bytes)
+            .map_err(|e| format!("Failed to read CSV row: {}", e))?;
+        let text = decode_with_encoding(&bytes, &session.encoding_name);
+        let cells = parse_csv_record(&text, delimiter);
+        scanned += 1;
+
+        let cell_value = cells.get(column_index).map(|s| s.as_str()).unwrap_or("");
+        if re.is_match(cell_value) {
+            matched_rows.push(cells);
+            if matched_rows.len() >= capped_max {
+                break;
+            }
+        }
+    }
+
+    // Clean up cancel token
+    if let Ok(mut tokens) = CANCEL_TOKENS.lock() {
+        tokens.remove(&cancel_key);
+    }
+
+    Ok(CsvFilterResult {
+        header: index.header,
+        rows: matched_rows,
+        match_count: scanned,
+        scanned_count: scanned,
+        truncated: was_cancelled || scanned < row_count,
+        error: if was_cancelled { "cancelled".to_string() } else { String::new() },
+    })
+}
+
+#[tauri::command]
+fn close_all_file_sessions() -> Result<usize, String> {
+    let mut sessions = FILE_SESSIONS
+        .lock()
+        .map_err(|_| "File session lock poisoned".to_string())?;
+    let count = sessions.len();
+    sessions.clear();
+    Ok(count)
+}
+
+#[tauri::command]
+fn cancel_filter(session_id: String) -> bool {
+    let a = cancel_token(&format!("log-filter-{}", session_id));
+    let b = cancel_token(&format!("csv-filter-{}", session_id));
+    a || b
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LifecycleMetrics {
+    pub sessions_created: u64,
+    pub sessions_closed: u64,
+    pub forced_evictions: u64,
+    pub expired_evictions: u64,
+    pub cancellations: u64,
+    pub compactions: u64,
+    pub active_sessions: usize,
+}
+
+#[tauri::command]
+fn get_lifecycle_metrics() -> Result<LifecycleMetrics, String> {
+    let active = FILE_SESSIONS
+        .lock()
+        .map(|s| s.len())
+        .unwrap_or(0);
+    Ok(LifecycleMetrics {
+        sessions_created: METRIC_SESSIONS_CREATED.load(Ordering::Relaxed),
+        sessions_closed: METRIC_SESSIONS_CLOSED.load(Ordering::Relaxed),
+        forced_evictions: METRIC_FORCED_EVICTIONS.load(Ordering::Relaxed),
+        expired_evictions: METRIC_EXPIRED_EVICTIONS.load(Ordering::Relaxed),
+        cancellations: METRIC_CANCELLATIONS.load(Ordering::Relaxed),
+        compactions: METRIC_COMPACTIONS.load(Ordering::Relaxed),
+        active_sessions: active,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2060,14 +2427,20 @@ pub fn run() {
             open_file_session,
             read_file_range,
             close_file_session,
+            close_all_file_sessions,
             get_log_lines,
             filter_log_session,
+            cancel_filter,
             index_json_session,
             lookup_json_path_session,
             fetch_json_children,
             get_session_cache_stats,
+            get_session_diagnostics,
+            get_lifecycle_metrics,
+            evict_inactive_sessions,
             index_csv_session,
             get_csv_rows,
+            filter_csv_rows,
             compact_session_caches,
             save_file,
             save_file_as,

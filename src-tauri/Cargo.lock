@@ -390,6 +390,7 @@ dependencies = [
  "chardetng",
  "encoding_rs",
  "once_cell",
+ "regex",
  "serde",
  "serde_json",
  "tauri",

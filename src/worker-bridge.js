@@ -9,11 +9,29 @@ export class WorkerBridge {
   constructor() {
     this._worker = null;
     this._nextId = 0;
-    this._pending = new Map();       // id → { resolve, reject }
+    this._pending = new Map();       // id → { resolve, reject, createdAt }
     this._latestByType = new Map();  // taskType → latest request id
+    this._disposed = false;
+    this._staleTimer = null;
+    this._startStaleCleanup();
+  }
+
+  /** Periodically reject pending requests older than 30 seconds. */
+  _startStaleCleanup() {
+    this._staleTimer = setInterval(() => {
+      const now = Date.now();
+      const staleThreshold = 30_000;
+      for (const [id, entry] of this._pending) {
+        if (now - entry.createdAt > staleThreshold) {
+          entry.reject(new Error('cancelled'));
+          this._pending.delete(id);
+        }
+      }
+    }, 10_000);
   }
 
   _ensureWorker() {
+    if (this._disposed) throw new Error('WorkerBridge disposed');
     if (!this._worker) {
       this._worker = new Worker(
         new URL('./query-worker.js', import.meta.url),
@@ -68,9 +86,35 @@ export class WorkerBridge {
     this._latestByType.set(taskType, id);
 
     return new Promise((resolve, reject) => {
-      this._pending.set(id, { resolve, reject });
+      this._pending.set(id, { resolve, reject, createdAt: Date.now() });
       this._worker.postMessage({ id, type: taskType, payload });
     });
+  }
+
+  /** Cancel all pending requests without terminating the worker. */
+  cancelAll() {
+    for (const [id, entry] of this._pending) {
+      entry.reject(new Error('cancelled'));
+      if (this._worker) {
+        try { this._worker.postMessage({ id, type: 'cancel' }); } catch {}
+      }
+    }
+    this._pending.clear();
+    this._latestByType.clear();
+  }
+
+  /** Terminate the worker and reject all pending. No further sends allowed. */
+  dispose() {
+    this._disposed = true;
+    if (this._staleTimer) {
+      clearInterval(this._staleTimer);
+      this._staleTimer = null;
+    }
+    this.cancelAll();
+    if (this._worker) {
+      try { this._worker.terminate(); } catch {}
+      this._worker = null;
+    }
   }
 
   /** Filter log content — returns the same shape as filterLogContent(). */
